@@ -1,0 +1,38 @@
+build/
+Tests/cases/*/constant/
+Benchmarks/results/
+# Only the GENERATED contents of a benchmark case's constant/ are
+# ignored -- not the whole directory. The family-6 solver cases keep
+# hand-written constant/ dictionaries (g, transportProperties,
+# turbulenceProperties, momentumTransport) which must be tracked, or
+# they cannot run from a fresh clone.
+Benchmarks/cases/*/constant/polyMesh/
+Benchmarks/cases/*/constant/wallDist_*.vtk
+Benchmarks/cases/*/constant/cellToRegion
+Benchmarks/cases/*/case.foam
+Tests/cases/*/case.foam
+Benchmarks/cases/bm_solver_smoke/0.*/
+Benchmarks/cases/*/0.*/
+Benchmarks/cases/*/[1-9]*/
+Benchmarks/cases/*/processor*/
+# setFields overwrites 0/alpha.water in place; only the pristine
+# 0/alpha.water.orig is tracked (standard OpenFOAM 0.orig convention).
+Benchmarks/cases/*/0/alpha.water
+*.png
+!/ninjaMesher.png
+Tests/cases/*/debug-vtk/
+Benchmarks/cases/*/debug-vtk/
+Tests/cases/*/prelayers-dump/
+Benchmarks/cases/*/prelayers-dump/
+__pycache__/
+Tests/cases/*/layers-debug/
+Benchmarks/cases/*/layers-debug/
+
+Posts/
+Benchmarks/cases/sweep_*/
+Benchmarks/results-sweep/
+
+# checkMesh -writeAllFields / postProcessing outputs
+postProcessing/
+
+anim_*

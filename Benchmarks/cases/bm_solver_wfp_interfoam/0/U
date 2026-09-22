@@ -1,0 +1,24 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    location    "0";
+    object      U;
+}
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0 0 0);
+
+boundaryField
+{
+    inletWeir   { type variableHeightFlowRateInletVelocity; flowRate 20.0; alpha alpha.water; value uniform (0 0 0); }
+    inletB      { type noSlip; }
+    outlet      { type pressureInletOutletVelocity; value uniform (0 0 0); }
+    fixedWalls  { type noSlip; }
+    atmosphere  { type pressureInletOutletVelocity; value uniform (0 0 0); }
+    side_ymin   { type noSlip; }
+    side_ymax   { type noSlip; }
+    bed         { type noSlip; }
+}

@@ -1,0 +1,53 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0 0 0);
+
+boundaryField
+{
+    inlet
+    {
+        type            variableHeightFlowRateInletVelocity;
+        flowRate        table
+        (
+            (  0.0      0.0)
+            (  0.2    920.0)
+            (100.0    920.0)
+        );
+        alpha           alpha.water;
+        value           uniform (0 0 0);
+    }
+
+    outlet
+    {
+        type            inletOutlet;
+        inletValue      uniform (0 0 0);
+        value           uniform (0 0 0);
+    }
+
+    atmosphere
+    {
+        type            pressureInletOutletVelocity;
+        value           uniform (0 0 0);
+    }
+
+    "(cresta|pilas|fondo|compuertas|muros|talud)"
+    {
+        type            noSlip;
+    }
+
+    "(side_ymin|side_ymax|bottom)"
+    {
+        type            slip;
+    }
+}
+
+// ************************************************************************* //

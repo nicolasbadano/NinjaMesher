@@ -1,0 +1,36 @@
+domain
+{
+    min   (0 0 0);
+    max   (1 1 1);
+    n     (10 10 10);
+}
+
+patches
+{
+    xmin { type patch; name inlet;  }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name bottom; }
+    ymax { type wall;  name top;    }
+    zmin { type patch; name front;  }
+    zmax { type patch; name back;   }
+}
+
+geometry
+{
+    sphere.stl
+    {
+        name sphere;
+    }
+}
+
+locationInMesh (0.05 0.05 0.05);
+
+layers
+{
+    sphere.stl
+    {
+        nLayers          3;
+        finalLayerThickness   0.197802198;
+        expansionRatio   1.2;
+    }
+}

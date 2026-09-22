@@ -1,0 +1,24 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      alpha.water;
+}
+
+dimensions      [0 0 0 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inletWeir   { type inletOutlet; inletValue uniform 1; value uniform 1; }
+    inletB      { type fixedValue;  value uniform 1; }
+    outlet      { type variableHeightFlowRate; lowerBound 0; upperBound 1; value uniform 0; }
+    fixedWalls  { type zeroGradient; }
+    atmosphere  { type inletOutlet; inletValue uniform 0; value uniform 0; }
+    side_ymin   { type zeroGradient; }
+    side_ymax   { type zeroGradient; }
+    bed         { type zeroGradient; }
+}

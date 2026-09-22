@@ -1,0 +1,43 @@
+// Grid-aligned 4x4x4-base-cell sub-box of bm_layers_wfp across a refinement-level
+// transition on the real CAD. See Tests/test_layerdrops.sh.
+domain
+{
+    min (4.98232144 8.6 3);
+    max (8.18232144 11.8 6.2);
+    n   (4 4 4);
+}
+
+patches
+{
+    xmin { type patch; name inletWeir; }
+    xmax { type patch; name outlet; }
+    ymin { type patch; name side_ymin; }
+    ymax { type patch; name side_ymax; }
+    zmin { type patch; name bed; }
+    zmax { type patch; name atmosphere; }
+}
+
+geometry
+{
+    wfp_fw.stl { name fixedWalls; }
+    wfp_ib.stl { name inletB;     }
+}
+
+locationInMesh (5.41 9.71 5.01);
+
+refinement
+{
+    nearWalls { type surface; stl wfp_fw.stl; distance 0.4; level 2; }
+    box7   { type box; min (-7.50  0.0  3.0); max ( 6.00  7.0  5.6); level 3; }
+    box8   { type box; min ( 6.00  9.0  3.0); max (11.00 14.0  5.6); level 3; }
+    box9   { type box; min ( 2.00  5.2  5.3); max (10.00  9.8  5.6); level 4; }
+    box10  { type box; min ( 5.50  9.8  5.3); max (10.00 10.1  5.6); level 4; }
+    inletA { type box; min (-7.54  0.29 3.0); max (-6.71  1.12 11.0); level 3; }
+    inletB { type box; min (-7.33  3.85 3.05); max (-6.92  5.15  3.50); level 4; }
+}
+
+layers
+{
+    wfp_fw.stl { nLayers 6; expansionRatio 1.8; finalLayerThickness 0.3; }
+}
+

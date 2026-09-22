@@ -1,0 +1,37 @@
+domain
+{
+    min   (0 0 0);
+    max   (1 1 1);
+    n     (40 40 40);
+}
+
+patches
+{
+    xmin { type patch; name inlet;  }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name bottom; }
+    ymax { type wall;  name top;    }
+    zmin { type patch; name front;  }
+    zmax { type patch; name back;   }
+}
+
+refinement
+{
+    nearSphere
+    {
+        type surface;
+        stl sphere.stl;
+        distance 0.1;
+        level 2;
+    }
+}
+
+geometry
+{
+    sphere.stl
+    {
+        name sphere;
+    }
+}
+
+locationInMesh (0.02 0.02 0.02);

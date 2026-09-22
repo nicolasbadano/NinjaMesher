@@ -1,0 +1,373 @@
+# Per-case pass/fail expectations for Benchmarks/run_all.sh.
+#
+# Mesh gates, read by summary.py:
+#   checkmesh_ok           (bool)  require checkMesh's "Mesh OK." verdict
+#   volume    = [expected, rel_tol]     total fluid volume band
+#   wall_area = [expected, rel_tol]     wall patch area band -- catches
+#                          local misclassification that nets out in volume
+#   max_nonortho_below     (float) ceiling on max non-orthogonality
+#   max_skewness_below     (float) ceiling on max skewness
+#   max_aspect_ratio_below (float) ceiling on max cell aspect ratio
+#   max_wall_clock_seconds (float) ceiling on mesher wall-clock
+#   sealed_wall_area_below (float) ceiling on the wall area the layer seal
+#                          guard found landing inside the solid
+#   min_layer_height_frac_above (float) floor on the worst achieved vs
+#                          requested first-layer height
+#   min_cell_volume_above  (float) floor on checkMesh's "Min volume"
+#   zero_face_geometry_patches_max (int) ceiling on named geometry patches
+#                          left with no faces
+#   expected_fail = true   documented limit: the checkMesh verdict is
+#                          recorded rather than gated, and the comment must
+#                          say why. Quantitative gates still bind.
+#   slow = true            skipped unless `run_all.sh --all`; the
+#                          `benchmarks` ctest gate uses the fast set.
+#
+# Solver gates, read by run_all.sh's run_solver_case. Reaching the dict's
+# endTime is gated unconditionally and needs no key here.
+#   min_steps          (int)   floor on "Time = " lines in the solver log.
+#                      A FLOOR ONLY -- it catches a solver that exits 0
+#                      having done essentially nothing. Do NOT tighten it
+#                      around a measured step count: a mesh good enough to
+#                      let the time-step controller take bigger steps
+#                      reaches endTime in FEWER steps, and a floor set just
+#                      under today's count turns that improvement into a
+#                      red gate. (It did: bm_solver_wfp_interfoam went
+#                      20+ -> 12 steps when its collapsed layer prism was
+#                      fixed, and failed min_steps = 20 on the better mesh.)
+#   max_courant        (float) ceiling on the reported max Courant number
+#   max_bounding_lines (int)   ceiling on "bounding ..." lines
+#   max_cum_cont_err   (float) ceiling on |cumulative continuity error|
+# A case omitting these keeps the exit-code + FOAM-FATAL-only gate.
+
+# ==================== Basic cut ====================
+
+[bm_sphere_coarse]
+checkmesh_ok = true
+volume = [0.886903, 0.02]   # 1 - sphere(r=0.3)
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+[bm_sphere_refined]
+checkmesh_ok = true
+volume = [0.886903, 0.02]   # 1 - sphere(r=0.3)
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+[bm_two_spheres]
+checkmesh_ok = true
+volume = [0.98552354, 0.02]
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+[bm_rotcube_fine]
+checkmesh_ok = true
+volume = [0.936, 0.02]
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+# A plate 0.4*cell thick, centred off any grid-vertex plane, is invisible to
+# the parity/intercept classification: both faces cross each grid edge an even
+# number of times, so cutEdges = 0 and the kept volume is 1.0 instead of 0.96.
+# checkMesh still says "Mesh OK." -- the silent form of the thin-feature limit,
+# a valid mesh that is WRONG. Validity-only gate; no volume assertion.
+[bm_thin_plate]
+checkmesh_ok = true
+
+[bm_diag_jump]
+checkmesh_ok = true
+
+[bm_sphere_offcenter]
+checkmesh_ok = true
+volume = [0.9345502, 0.02]
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+# Kept fluid is the small interior cavity, so faceting bias is a much larger
+# RELATIVE error against that small denominator: 3% band rather than more cells.
+[bm_cavity_sphere]
+checkmesh_ok = true
+volume = [0.1130973, 0.03]
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+# ==================== Adverse placements ====================
+
+# Sphere tangent to a grid plane, box face exactly on one; the snap-to-endpoint
+# and sliver-drop tie-breaks absorb both cleanly.
+[bm_adv_gridplane]
+checkmesh_ok = true
+volume = [0.95849, 0.02]   # 1 - sphere(r=0.2) - box(0.2^3)
+
+# Box vertices bit-exact on grid points. checkMesh reports small-determinant /
+# concave cells at those vertices: a quality-floor limit, not a topology failure.
+[bm_adv_gridpoint]
+expected_fail = true
+volume = [0.973, 0.02]   # 1 - 0.3^3
+wall_area = [0.54, 0.02]   # the box's full surface, 6*(0.3)^2
+
+# Sphere tangent to the domain boundary from inside. The cut degenerates to
+# near-zero contact at one point: quality-floor limit, not a tie-break bug.
+[bm_adv_tangent]
+expected_fail = true
+
+# Box edge along a grid edge line. Residual small-determinant / concave cells,
+# same quality-floor limit as bm_adv_gridpoint.
+[bm_adv_edgegraze]
+expected_fail = true
+
+# ==================== STL x domain boundary ====================
+
+# Sphere centred ON xmin, half in and half out; the solid half's faces vanish.
+[bm_bd_halfsphere]
+checkmesh_ok = true
+volume = [0.967275, 0.02]   # 1 - (2/3)*pi*r^3, r=0.25
+
+# Box protruding through ymax, its rim coincident with the domain wall. The
+# degenerate rim chord is dropped as a sliver; 2 small-determinant cells remain.
+[bm_bd_protrude]
+expected_fail = true
+volume = [0.992, 0.02]   # 1 - 0.2^3
+wall_area = [0.2, 0.02]   # bottom 0.2x0.2 + four side strips (0.8 x 0.2); the ymax opening is domain patch, not wall
+
+[bm_bd_corner]
+checkmesh_ok = true
+volume = [0.985863, 0.02]   # 1 - (1/8)*(4/3)*pi*r^3, r=0.3
+
+# ==================== Internal flow ====================
+
+# Capped cylinder through the domain, fluid = the bore, at n=20^3 (base n=10 is
+# too coarse for an r=0.2 bore).
+[bm_int_pipe]
+checkmesh_ok = true
+volume = [0.1256637, 0.03]   # pi*r^2*1, r=0.2 -- caps sit outside the domain, so it spans full z
+
+# Mitred L-tube, r=0.08. The corner cross-section is intrinsically thin against
+# any grid coarse enough to keep the suite fast, so corner cells are genuinely
+# poorly shaped and the volume error exceeds 3%: quality-floor limit.
+[bm_int_elbow]
+expected_fail = true
+
+# ==================== Refinement x geometry ====================
+
+# All three: refinement changes cell quality and count, not the swept volume, so
+# the analytic sphere gate still applies. maxAdjacentLevelDiff == 1 is checked
+# separately by run_all.sh --refine-stats.
+[bm_ref_partial]
+checkmesh_ok = true
+volume = [0.886903, 0.02]   # 1 - sphere(r=0.3)
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+[bm_ref_level3]
+checkmesh_ok = true
+volume = [0.886903, 0.02]
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+# Three disjoint multi-level regions make more refinement-interface faces than
+# any single-region case, tripping checkMesh's concave-angle face check on
+# geometry summary.py already whitelists.
+[bm_ref_multi]
+checkmesh_ok = true
+volume = [0.886903, 0.02]
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+# ==================== Distance-mode surface refinement ====================
+
+# Distance band (0.08, level 2) around an icosphere r=0.3. The band changes
+# resolution near the surface, not which cells are kept. run_all.sh separately
+# checks per-level nonzero counts, proving the band actually formed.
+[bm_dist_sphere]
+checkmesh_ok = true
+volume = [0.886903, 0.02]
+max_nonortho_below = 75.0
+max_skewness_below = 6.0
+
+# bm_thin_plate's geometry with a distance rule (0.1, level 2 -> h = 0.025) so
+# the cutter can see the plate. The plate spans the full cross-section, so the
+# fluid splits in two and the flood fill drops the pocket locationInMesh is not
+# in -- hence 0.51, not the full analytic 0.96.
+[bm_dist_thinplate]
+volume = [0.51, 0.02]
+
+# 81920-triangle icosphere: CI proxy for anyTriangleWithin's large-soup path
+# (AABB bins, first-hit early exit) without a heavy real-CAD import.
+[bm_dist_bigsoup]
+checkmesh_ok = true
+volume = [0.886903, 0.02]   # as bm_dist_sphere
+max_wall_clock_seconds = 60   # hard wall-clock gate; fast set
+
+# ==================== Scale ====================
+
+[bm_scale_100]
+checkmesh_ok = true
+slow = true
+
+[bm_scale_refined]
+checkmesh_ok = true
+slow = true
+
+# 40^3 base + a distance band, exercising triangle binning under the iterative
+# mark/split/re-grade loop.
+[bm_dist_scale]
+checkmesh_ok = true
+slow = true
+
+# ==================== Solver depth ====================
+
+[bm_solver_simple]
+slow = true
+
+[bm_solver_ico_refined]
+slow = true
+
+# ==================== Real CAD ====================
+
+# Layer extrusion on the full fish passage. The remaining checkMesh failures are
+# the whitelisted quality floors; wrong-oriented pyramids and bad face tets are
+# ZERO, and the skewness band is measured-plus-margin to catch their regression.
+[bm_layers_fishpassage]
+checkmesh_ok = true
+volume = [614.519, 0.02]
+max_skewness_below = 4.5
+max_nonortho_below = 70.0
+slow = true
+
+# interFoam on the layered fish passage: a mesh that passes checkMesh must also
+# run in the workhorse solver. Gated twice on one mesh -- checkMesh below, plus
+# convergence. Measured healthy run: 57 steps, peak Courant 0.518, cum. continuity
+# error 3.4e-06. Each ceiling clears that comfortably but still catches divergence.
+[bm_solver_fp_interfoam]
+checkmesh_ok = true
+volume = [613.593, 0.02]
+max_skewness_below = 4.2
+min_steps = 3
+max_courant = 1.0
+max_bounding_lines = 60
+max_cum_cont_err = 1e-3
+slow = true
+
+# The guiding-principle case: completely error free. Only the whitelisted quality
+# floors remain, and the skewness band is measured-plus-margin (measured 4.048).
+[bm_layers_fishpassage_coarse]
+checkmesh_ok = true
+volume = [613.593, 0.02]
+max_skewness_below = 4.2
+max_nonortho_below = 70.0
+slow = true
+
+# The WFP fish-passage mouth, 6 layers at expansionRatio 1.8.
+[bm_layers_wfp]
+checkmesh_ok = true
+volume = [15059.8, 0.02]
+wall_area = [4222.01, 0.02]
+max_skewness_below = 4.3
+max_nonortho_below = 70.0
+# HISTORY, not a live disclosure. This ceiling was set at 900 against a
+# then-measured 725.6, to sit under checkMesh's own aspect threshold of 1000
+# -- checkMesh reports OK on a prism this repo still counts as a defect, so
+# the gate was deliberately stricter than the oracle. HEAD no longer builds
+# that prism: measured 190.8 on 2026-09-19. The ceiling is left where it is
+# rather than re-tightened around a number the layer work in flight will
+# move again.
+max_aspect_ratio_below = 900
+slow = true
+
+# interFoam on the bm_layers_wfp mesh, gated twice as above.
+#
+# WHY max_courant SITS AT 6.0, ABOVE THIS CASE'S OWN maxCo OF 2 -- HISTORY.
+# The mesh used to carry a collapsed layer prism (V = 1.68e-07 m3, 0.88 mm
+# where the first layer should be 3.1 mm). Courant = 0.5*dt*sum|phi|/V, so
+# that one cell pinned the global time step: the controller cut deltaT 20x
+# and still reported 2.786, while checkMesh called the same mesh "Cell
+# volumes OK". The ceiling was raised to disclose that rather than relax it.
+#
+# HEAD NO LONGER PRODUCES THAT PRISM. Measured 2026-09-19: min cell volume
+# 1.06e-06 (6.3x larger), peak Courant 1.777, endTime reached in 12 steps.
+# The defect is not gone in kind -- the worst achieved first layer is still
+# 35% of what was requested (minLayerHeightFrac 0.350142), and checkMesh
+# still calls that fine -- but it no longer pins the step.
+#
+# The ceiling is NOT tightened here. Re-baselining it around 1.777 would be
+# work the layer-thickness change in flight invalidates, and a ceiling set
+# just above today's measurement is the same trap min_steps fell into (see
+# the header). Re-measure and tighten once that lands.
+[bm_solver_wfp_interfoam]
+checkmesh_ok = true
+volume = [15059.8, 0.02]
+wall_area = [4221.98, 0.02]
+max_skewness_below = 4.3
+max_aspect_ratio_below = 900
+min_steps = 3
+max_courant = 6.0
+max_bounding_lines = 30
+max_cum_cont_err = 1e-4
+slow = true
+
+# Real production spillway CAD, 4 inflation layers per surface.
+[bm_layers_gate]
+checkmesh_ok = true
+volume = [235941.0, 0.02]
+wall_area = [28680.0, 0.02]
+max_skewness_below = 4.0
+max_nonortho_below = 70.0
+slow = true
+
+# interFoam on the bm_layers_gate mesh, gated twice as above. Measured: 73 steps
+# to endTime, peak Courant 0.523 against maxCo 0.5, cum. continuity error 3.2e-06.
+[bm_solver_gate_interfoam]
+checkmesh_ok = true
+volume = [236443.0, 0.02]
+wall_area = [29256.9, 0.02]
+max_skewness_below = 4.0
+min_steps = 3
+max_courant = 1.0
+max_bounding_lines = 60
+max_cum_cont_err = 1e-4
+slow = true
+
+# Dam bottom outlet + aerator. snappy asks for 8 layers; this uses 4 at the same
+# expansionRatio, because at 8 the quality gate did not settle. Not re-measured
+# at full scale since the seal guard landed.
+#
+# The volume gate is the LAYERED value, 4.2% under the un-layered one, and that is
+# the faithful number: the offset cut resolves the 1.7-11 mm plates the plain cut
+# leaks straight through, so the delta is the baseline's leak, not lost domain.
+# sealed_wall_area_below binds even under a verdict waiver -- a waiver is about
+# mesh quality, never about the mesh describing a different flow domain than the STL.
+# descargadorG4bT.stl is a RECONSTRUCTION of the client CAD, not the CAD itself. The
+# CAD is built from overlapping bodies with coincident faces; ninjaMesher's parity
+# classifier reads the overlap of two bodies as fluid and meshed 769 636 cells of
+# concrete interior (discarded as disconnected) plus 8 999 wall faces whose layers
+# could never land. The fluid was meshed once with snappyHexMesh (castellate +
+# snap at 0.125 m, no layers, box 0.25 m outside this domain, same locationInMesh)
+# and its boundary faces written back as one closed surface: 897 788 triangles,
+# 0 non-manifold edges, volume 19 708 m3 in that box. Measured on it: volume
+# 18 439 (18 454.6 on the raw CAD, -0.08 %), wall area 3 139 (4 909: coincident
+# and interior faces gone), droppedFaces 15 370 -> 1 582, infeasibleWallArea
+# 261 -> 19.8 m2, surfaceClampedSteps 19 906 -> 42, max skewness 3.63 -> 2.80,
+# cells 1.68 M -> 2.33 M (the fluid that used to be discarded).
+[bm_layers_descargador]
+checkmesh_ok = true
+volume = [18439.0, 0.02]
+wall_area = [3139.1, 0.02]
+max_skewness_below = 4.2
+max_nonortho_below = 70.0
+sealed_wall_area_below = 0.5
+slow = true
+
+# interFoam on the bm_layers_descargador mesh, gated twice as above. Measured on the
+# reconstructed surface: 51 steps, peak Courant 0.932 on step 1 only (fixed deltaT
+# before the controller takes over), zero bounding lines.
+[bm_solver_descargador_interfoam]
+checkmesh_ok = true
+volume = [18439.0, 0.02]
+wall_area = [3139.1, 0.02]
+max_skewness_below = 4.2
+sealed_wall_area_below = 0.5
+min_steps = 3
+max_courant = 2.0
+max_bounding_lines = 30
+max_cum_cont_err = 1e-4
+slow = true

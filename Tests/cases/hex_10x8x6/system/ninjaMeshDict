@@ -1,0 +1,16 @@
+domain
+{
+    min   (0 0 0);        // xmin ymin zmin
+    max   (1 0.5 0.5);
+    n     (10 8 6);        // nx ny nz
+}
+
+patches
+{
+    xmin { type patch; name inlet;  }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name bottom; }
+    ymax { type wall;  name top;    }
+    zmin { type patch; name front;  }
+    zmax { type patch; name back;   }
+}

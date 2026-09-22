@@ -1,0 +1,24 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      k;
+}
+
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform 0.0001;
+
+boundaryField
+{
+    inletWeir   { type fixedValue; value uniform 0.000086; }
+    inletB      { type fixedValue; value uniform 0.0027; }
+    outlet      { type inletOutlet; inletValue $internalField; value $internalField; }
+    fixedWalls  { type kqRWallFunction; value $internalField; }
+    atmosphere  { type inletOutlet; inletValue $internalField; value $internalField; }
+    side_ymin   { type kqRWallFunction; value $internalField; }
+    side_ymax   { type kqRWallFunction; value $internalField; }
+    bed         { type kqRWallFunction; value $internalField; }
+}

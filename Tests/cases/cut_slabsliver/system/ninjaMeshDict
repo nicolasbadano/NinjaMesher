@@ -1,0 +1,29 @@
+// A wall 0.8 to 2.5 thousandths of a cell below the grid plane y = 0.3, tilted
+// so the row of cells under that plane sweeps slab volume fractions across the
+// sliver threshold. See Tests/test_slabsliver.sh.
+domain
+{
+    min   (0 0 0);
+    max   (1 1 1);
+    n     (10 10 10);
+}
+
+patches
+{
+    xmin { type patch; name inlet;  }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name bottom; }
+    ymax { type wall;  name top;    }
+    zmin { type patch; name front;  }
+    zmax { type patch; name back;   }
+}
+
+geometry
+{
+    slab.stl
+    {
+        name slab;
+    }
+}
+
+locationInMesh (0.55 0.75 0.55);

@@ -1,0 +1,39 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSchemes;
+}
+
+// Empty schemes: no solver runs these cases, but checkMesh reads this
+// file as part of the standard case-construction path.
+ddtSchemes
+{
+    default         none;
+}
+
+gradSchemes
+{
+    default         none;
+}
+
+divSchemes
+{
+    default         none;
+}
+
+laplacianSchemes
+{
+    default         none;
+}
+
+interpolationSchemes
+{
+    default         none;
+}
+
+snGradSchemes
+{
+    default         none;
+}

@@ -1,0 +1,38 @@
+domain
+{
+    min (-35.5 -3.5 65.0);
+    max ( 47.5  4.0 114.0);
+    n   (166 15 98);
+}
+
+patches
+{
+    xmin { type patch; name inlet;      }
+    xmax { type patch; name outlet;     }
+    ymin { type patch; name symmetry;   }
+    ymax { type patch; name symmetry;   }
+    zmin { type patch; name symmetry;   }
+    zmax { type patch; name atmosphere; }
+}
+
+geometry
+{
+    descargadorG4bT.stl { name fixedWalls; }
+    aireadorT.stl       { name aireador;   }
+}
+
+locationInMesh (-0.21 -0.21 78.01);
+
+refinement
+{
+    worksBox   { type box; min (-2.0 -3.5 70.0); max (42.0 4.0 92.0); level 1; }
+    nearWalls  { type surface; stl descargadorG4bT.stl; distance 0.4; level 2; }
+    conduitBox { type box; min (-1.0 -3.5 73.0); max (40.0 4.0 81.5); level 1; }
+    nearAir    { type surface; stl aireadorT.stl; distance 0.5; level 2; }
+}
+
+layers
+{
+    descargadorG4bT.stl { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.3; }
+}
+

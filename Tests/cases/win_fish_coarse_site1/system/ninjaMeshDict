@@ -1,0 +1,33 @@
+domain
+{
+    min (-7.56 -0.46 -4.6);
+    max (-5.76 1.1 -2.08);
+    n   (15 13 21);
+}
+
+patches
+{
+    xmin { type patch; name inlet; }
+    xmax { type patch; name outlet; }
+    ymin { type patch; name bed; }
+    ymax { type patch; name top; }
+    zmin { type patch; name side_zmin; }
+    zmax { type patch; name side_zmax; }
+}
+
+geometry
+{
+    fp.stl { name passage; }
+}
+
+locationInMesh (-5.778 0.32 -3.34);
+
+refinement
+{
+    nearPassage { type surface; stl fp.stl; distance 0.24; level 1; }
+}
+
+layers
+{
+    fp.stl { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.4; }
+}

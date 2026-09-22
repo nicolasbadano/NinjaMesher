@@ -1,0 +1,23 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      omega;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 0 -1 0 0 0 0];
+internalField   uniform 0.062;
+
+boundaryField
+{
+    inlet       { type fixedValue; value uniform 0.11; }
+    outlet      { type inletOutlet; inletValue $internalField; value $internalField; }
+    atmosphere  { type inletOutlet; inletValue $internalField; value $internalField; }
+    symmetry    { type zeroGradient; }
+    fixedWalls  { type omegaWallFunction; value $internalField; }
+    aireador    { type inletOutlet; inletValue uniform 16.0; value uniform 16.0; }
+}
+// ************************************************************************* //

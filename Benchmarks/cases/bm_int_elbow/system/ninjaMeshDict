@@ -1,0 +1,26 @@
+domain
+{
+    min   (0 0 0);
+    max   (1 1 1);
+    n     (25 25 25);
+}
+
+patches
+{
+    xmin { type patch; name inlet;  }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name bottom; }
+    ymax { type wall;  name top;    }
+    zmin { type patch; name front;  }
+    zmax { type patch; name back;   }
+}
+
+geometry
+{
+    elbow.stl
+    {
+        name elbow;
+    }
+}
+
+locationInMesh (0.35 0.5 0.2);

@@ -1,0 +1,49 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      p_rgh;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [1 -1 -2 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedFluxPressure;
+        value           uniform 0;
+    }
+
+    outlet
+    {
+        type            uniformMixed;
+        uniformValue    constant 19620;
+        uniformGradient constant 0;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "min(max(2.0 - pos().z(), 0), 1)";
+        }
+        value           uniform 0;
+    }
+
+    atmosphere
+    {
+        type            totalPressure;
+        p0              uniform 0;
+        value           uniform 0;
+    }
+
+    "(cresta|pilas|fondo|compuertas|muros|talud|side_ymin|side_ymax|bottom)"
+    {
+        type            fixedFluxPressure;
+        value           uniform 0;
+    }
+}
+
+// ************************************************************************* //

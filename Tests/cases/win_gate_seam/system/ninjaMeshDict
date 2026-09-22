@@ -1,0 +1,51 @@
+// Grid-aligned 11x12x7-base-cell sub-box of bm_layers_gate around the slope where
+// front points used to be extruded twice. See Tests/test_layerdrops.sh.
+domain
+{
+    min (-26 -52 -1);
+    max (-15 -40 6);
+    n   (11 12 7);
+}
+
+patches
+{
+    xmin { type patch; name inlet; }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name side_ymin; }
+    ymax { type wall;  name side_ymax; }
+    zmin { type wall;  name bottom; }
+    zmax { type patch; name atmosphere; }
+}
+
+geometry
+{
+    compuertasG05.stl { name compuertas; }
+    crestaG05.stl     { name cresta; }
+    fondoG05.stl      { name fondo; }
+    pilasG05.stl      { name pilas; }
+    taludG05.stl      { name talud; }
+    murosG05.stl      { name muros; }
+}
+
+locationInMesh (-24.49 -45.49 5.01);
+
+refinement
+{
+    nearCompuertas { type surface; stl compuertasG05.stl; distance 0.25; level 3; }
+    nearPilas      { type surface; stl pilasG05.stl;      distance 0.75; level 2; }
+    nearCresta     { type surface; stl crestaG05.stl;     distance 1.5;  level 1; }
+    nearFondo      { type surface; stl fondoG05.stl;     distance 1.5;  level 1; }
+    nearMuros      { type surface; stl murosG05.stl;     distance 1.5;  level 1; }
+    nearTalud      { type surface; stl taludG05.stl;     distance 1.5;  level 1; }
+    centerBox      { type box; min (-7 -53 -4); max (5 39 4); level 1; }
+}
+
+layers
+{
+    compuertasG05.stl { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.4; }
+    pilasG05.stl      { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.4; }
+    crestaG05.stl     { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.4; }
+    fondoG05.stl      { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.4; }
+    murosG05.stl      { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.4; }
+    taludG05.stl      { nLayers 4; expansionRatio 1.5; finalLayerThickness 0.4; }
+}

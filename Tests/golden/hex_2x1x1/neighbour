@@ -1,0 +1,15 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       labelList;
+    object      neighbour;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// nPoints:12 nCells:2 nFaces:11 nInternalFaces:1
+
+1
+(
+1
+)

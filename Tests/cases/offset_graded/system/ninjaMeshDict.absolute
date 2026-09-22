@@ -1,0 +1,42 @@
+// Pre-2026-09-18 ABSOLUTE-thickness form of this case's dict, kept as a
+// fixture: test_offsetgraded.sh asserts the mesher REFUSES it and that
+// the finalLayerThickness its error message quotes reproduces this very
+// mesh. Not a runnable case on its own.
+domain
+{
+    min   (0 0 0);
+    max   (1 1 1);
+    n     (10 10 10);
+}
+
+patches
+{
+    xmin { type patch; name inlet;  }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name bottom; }
+    ymax { type wall;  name top;    }
+    zmin { type patch; name front;  }
+    zmax { type patch; name back;   }
+}
+
+geometry
+{
+    sphere.stl
+    {
+        name sphere;
+    }
+}
+
+locationInMesh (0.05 0.05 0.05);
+
+// offset_graded gate: 4 GRADED layers, ratio 1.3.
+
+layers
+{
+    sphere.stl
+    {
+        nLayers          4;
+        totalThickness   0.05;
+        expansionRatio   1.3;
+    }
+}

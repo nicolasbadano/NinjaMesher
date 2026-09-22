@@ -1,0 +1,24 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      nut;
+}
+
+dimensions      [0 2 -1 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inletWeir   { type calculated; value uniform 0; }
+    inletB      { type calculated; value uniform 0; }
+    outlet      { type calculated; value uniform 0; }
+    fixedWalls  { type nutkRoughWallFunction; Ks uniform 0.0015; Cs uniform 0.5; value uniform 0; }
+    atmosphere  { type calculated; value uniform 0; }
+    side_ymin   { type nutkRoughWallFunction; Ks uniform 0.0015; Cs uniform 0.5; value uniform 0; }
+    side_ymax   { type nutkRoughWallFunction; Ks uniform 0.0015; Cs uniform 0.5; value uniform 0; }
+    bed         { type nutkRoughWallFunction; Ks uniform 0.0015; Cs uniform 0.5; value uniform 0; }
+}

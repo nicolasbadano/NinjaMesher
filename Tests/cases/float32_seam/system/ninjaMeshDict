@@ -1,0 +1,26 @@
+domain
+{
+    min   (0 0 0);
+    max   (0.9 0.9 0.9);
+    n     (15 15 15);
+}
+
+patches
+{
+    xmin { type patch; name inlet;  }
+    xmax { type patch; name outlet; }
+    ymin { type wall;  name bottom; }
+    ymax { type wall;  name top;    }
+    zmin { type patch; name front;  }
+    zmax { type patch; name back;   }
+}
+
+geometry
+{
+    plate.stl
+    {
+        name plate;
+    }
+}
+
+locationInMesh (0.1 0.45 0.45);

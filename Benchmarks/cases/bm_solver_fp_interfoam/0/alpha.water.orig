@@ -1,0 +1,50 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      alpha.water;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 0 0 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        type            variableHeightFlowRate;
+        lowerBound      0;
+        upperBound      1;
+        value           uniform 0;
+    }
+
+    outlet
+    {
+        type            uniformMixed;
+        uniformValue    constant 1;
+        uniformGradient constant 0;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "min(max((1.2 - pos().y())*5, 0), 1)";
+        }
+        value           uniform 0;
+    }
+
+    top
+    {
+        type            inletOutlet;
+        inletValue      uniform 0;
+        value           uniform 0;
+    }
+
+    "(passage|bed|side_zmin|side_zmax)"
+    {
+        type            zeroGradient;
+    }
+}
+
+// ************************************************************************* //

@@ -1,0 +1,30 @@
+domain
+{
+    min (-26 36 9);
+    max (-22 40 13);
+    n   (4 4 4);
+}
+
+patches
+{
+    xmin { type patch; name inlet; }
+    xmax { type patch; name outlet; }
+    ymin { type patch; name side_ymin; }
+    ymax { type patch; name side_ymax; }
+    zmin { type patch; name bottom; }
+    zmax { type patch; name atmosphere; }
+}
+
+geometry
+{
+    pilasG05.stl      { name pilas; }
+    murosG05.stl      { name muros; }
+}
+
+locationInMesh (-24 36.04 11);
+
+refinement
+{
+    nearPilas      { type surface; stl pilasG05.stl;      distance 0.5; level 2; }
+    centerBox      { type box; min (-7 -53 -4); max (5 39 4); level 1; }
+}
