@@ -3442,6 +3442,9 @@ void dropDisconnectedCells(GeneratedMesh& mesh, std::vector<int>& cellLevel, std
 // See Cutter.hpp for the rationale, the measured motivation, and why this is
 // watertightness-safe (single-owner boundary faces, fan adds only interior
 // diagonals, no new points).
+// cos(70 deg): checkMesh's severe non-orthogonality threshold.
+constexpr double kCosMaxFanNonOrth = 0.34202014332566873;
+
 int planarizeBoundaryFaces(GeneratedMesh& mesh, const std::vector<std::string>& patchNames,
                            double warpTol, int* trianglesAdded, int* nonConvexSkipped,
                            int* apexPyramidFallback) {
@@ -3602,6 +3605,7 @@ int planarizeBoundaryFaces(GeneratedMesh& mesh, const std::vector<std::string>& 
                         }
                         int bestApex = -1;
                         double bestQ = -1.0;
+                        bool bestOrtho = false;
                         std::vector<std::vector<int>> candidate;
                         std::vector<std::vector<int>> bestLoops;
                         for (int apex = 0; apex < m; ++apex) {
@@ -3610,7 +3614,7 @@ int planarizeBoundaryFaces(GeneratedMesh& mesh, const std::vector<std::string>& 
                                 q = std::min(q, triQuality(pts[apex], pts[(apex + i) % m], pts[(apex + i + 1) % m]));
                             }
                             if (!convex && !fanInside(apex)) continue;
-                            if (q <= bestQ) continue; // cannot win the quality tie-break anyway
+                            if (bestOrtho && q <= bestQ) continue; // cannot win either key anyway
                             if (hostSlot >= ownLoops.size()) continue; // face not found on its owner: leave alone
                             candidate.clear();
                             candidate.reserve(ownLoops.size() + static_cast<std::size_t>(m) - 3);
@@ -3636,6 +3640,27 @@ int planarizeBoundaryFaces(GeneratedMesh& mesh, const std::vector<std::string>& 
                                 fanSkewOk = boundaryFaceSkewness(candidate[li], mesh.points, candCc) <= kMaxBoundarySkew;
                             }
                             if (!fanSkewOk) continue;
+                            // First key: every fan triangle faces the cell centre
+                            // within checkMesh's severe non-orthogonality angle.
+                            // A layer turns each triangle into an internal face
+                            // whose far side is only a thin prism, so a triangle
+                            // at the far end of a thin cut cell -- centre
+                            // beside it rather than behind it -- is
+                            // non-orthogonal from the first layer on and its
+                            // stack is dropped. MEASURED, hydrofoil window: 166
+                            // isolated triangular stacks, 77-87 deg from the
+                            // centre. Shape quality decides among the rest.
+                            bool ortho = true;
+                            for (std::size_t li = candidate.size() - static_cast<std::size_t>(m - 2);
+                                 li < candidate.size() && ortho; ++li) {
+                                const Vec3 sf = loopAreaVector(candidate[li], mesh.points);
+                                const Vec3 d = loopAreaCentroid(candidate[li], mesh.points) - candCc;
+                                const double den = norm(sf) * norm(d);
+                                ortho = den <= 0.0 || dot(sf, d) > den * kCosMaxFanNonOrth;
+                            }
+                            if (bestApex >= 0 && (bestOrtho && !ortho)) continue;
+                            if (bestApex >= 0 && ortho == bestOrtho && q <= bestQ) continue;
+                            bestOrtho = ortho;
                             bestQ = q;
                             bestApex = apex;
                             bestLoops = candidate;
