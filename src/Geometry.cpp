@@ -4,6 +4,8 @@
 
 #include "Geometry.hpp"
 
+#include <cstdint>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -113,9 +115,30 @@ TriangleAabbBins buildTriangleAabbBins(const std::vector<Triangle>& tris, int ta
     tb.lo = lo;
     tb.hi = hi;
 
-    const int target = std::max(
-        1, static_cast<int>(std::cbrt(static_cast<double>(tris.size()) / std::max(1, targetTrisPerBin))));
-    tb.nx = tb.ny = tb.nz = std::max(1, target);
+    // Near-cubic bins sized by SURFACE density: a sheet of area A crosses
+    // ~A/h^2 bins of edge h, so h = sqrt(A * target / N) puts ~target
+    // triangles in each bin it crosses. An equal bin COUNT per axis
+    // instead (the former n x n x n) turns an elongated or sparse box into
+    // slabs -- 19 x 128 x 5 mm over a 4 m foil -- that ray walks and
+    // nearest-point rings sweep by the thousand triangles. The total is
+    // capped at 8 bins per triangle (a sparse box -- a tall thin strut
+    // beside a flat foil -- would otherwise ask for millions), which
+    // coarsens h uniformly. Bins are an accelerator only: every query
+    // over them is exact whatever the layout.
+    const std::size_t nTris = tris.size();
+    const int target = std::max(1, targetTrisPerBin);
+    double area = 0.0;
+    for (const Triangle& t : tris) area += 0.5 * norm(cross(t.v1 - t.v0, t.v2 - t.v0));
+    const Vec3 ext = hi - lo;
+    const double maxBins = 8.0 * static_cast<double>(nTris) + 64.0;
+    double h = area > 0.0 ? std::sqrt(area * target / static_cast<double>(nTris)) : 0.0;
+    const double vol = ext.x * ext.y * ext.z;
+    h = std::max(h, std::cbrt(vol / maxBins));
+    h = std::max(h, std::max({ext.x, ext.y, ext.z}) / 4096.0);
+    auto binsAlong = [&](double e) { return std::max(1, static_cast<int>(std::ceil(e / h))); };
+    tb.nx = binsAlong(ext.x);
+    tb.ny = binsAlong(ext.y);
+    tb.nz = binsAlong(ext.z);
     tb.cellSize = Vec3{(hi.x - lo.x) / tb.nx, (hi.y - lo.y) / tb.ny, (hi.z - lo.z) / tb.nz};
     tb.bins.assign(static_cast<std::size_t>(tb.nx) * static_cast<std::size_t>(tb.ny) * static_cast<std::size_t>(tb.nz),
                     {});
@@ -150,6 +173,64 @@ TriangleAabbBins buildTriangleAabbBins(const std::vector<Triangle>& tris, int ta
                 }
             }
         }
+    }
+
+    // BVH for the nearest-point queries: median split of the triangle
+    // centroids along the longest axis of their bounds, 4 per leaf. Node
+    // boxes are the EXACT triangle bounds (a lower bound on the distance
+    // to any point of any triangle below the node).
+    tb.bvhTris.resize(tris.size());
+    std::vector<Vec3> cen(tris.size());
+    for (std::size_t i = 0; i < tris.size(); ++i) {
+        tb.bvhTris[i] = static_cast<int>(i);
+        cen[i] = (tris[i].v0 + tris[i].v1 + tris[i].v2) * (1.0 / 3.0);
+    }
+    struct Range { int node, first, count; };
+    tb.bvh.reserve(2 * tris.size() / 4 + 2);
+    tb.bvh.emplace_back();
+    std::vector<Range> todo{{0, 0, static_cast<int>(tris.size())}};
+    while (!todo.empty()) {
+        const Range r = todo.back();
+        todo.pop_back();
+        Vec3 blo{1e300, 1e300, 1e300}, bhi{-1e300, -1e300, -1e300};
+        Vec3 clo = blo, chi = bhi;
+        for (int k = r.first; k < r.first + r.count; ++k) {
+            const Triangle& t = tris[static_cast<std::size_t>(tb.bvhTris[static_cast<std::size_t>(k)])];
+            for (const Vec3& v : {t.v0, t.v1, t.v2}) {
+                blo = Vec3{std::min(blo.x, v.x), std::min(blo.y, v.y), std::min(blo.z, v.z)};
+                bhi = Vec3{std::max(bhi.x, v.x), std::max(bhi.y, v.y), std::max(bhi.z, v.z)};
+            }
+            const Vec3& c = cen[static_cast<std::size_t>(tb.bvhTris[static_cast<std::size_t>(k)])];
+            clo = Vec3{std::min(clo.x, c.x), std::min(clo.y, c.y), std::min(clo.z, c.z)};
+            chi = Vec3{std::max(chi.x, c.x), std::max(chi.y, c.y), std::max(chi.z, c.z)};
+        }
+        TriangleBvhNode& node = tb.bvh[static_cast<std::size_t>(r.node)];
+        node.lo = blo;
+        node.hi = bhi;
+        const Vec3 ce = chi - clo;
+        if (r.count <= 4 || std::max({ce.x, ce.y, ce.z}) <= 0.0) {
+            node.first = r.first;
+            node.count = r.count;
+            continue;
+        }
+        const int axis = ce.x >= ce.y && ce.x >= ce.z ? 0 : (ce.y >= ce.z ? 1 : 2);
+        auto key = [&](int t) {
+            const Vec3& c = cen[static_cast<std::size_t>(t)];
+            return axis == 0 ? c.x : (axis == 1 ? c.y : c.z);
+        };
+        const int half = r.count / 2;
+        auto b0 = tb.bvhTris.begin() + r.first;
+        std::nth_element(b0, b0 + half, b0 + r.count, [&](int u, int v) {
+            const double ku = key(u), kv = key(v);
+            return ku < kv || (ku == kv && u < v);
+        });
+        const int left = static_cast<int>(tb.bvh.size());
+        tb.bvh.emplace_back();
+        tb.bvh.emplace_back();
+        tb.bvh[static_cast<std::size_t>(r.node)].left = left;
+        tb.bvh[static_cast<std::size_t>(r.node)].right = left + 1;
+        todo.push_back({left, r.first, half});
+        todo.push_back({left + 1, r.first + half, r.count - half});
     }
     return tb;
 }
@@ -187,10 +268,20 @@ std::vector<int> queryAabbTriangles(const TriangleAabbBins& bins, const Vec3& lo
     return result;
 }
 
-std::vector<int> queryRayTriangles(const TriangleAabbBins& bins, const Vec3& origin, const Vec3& dir) {
-    std::vector<int> result;
+void visitRayTriangles(const TriangleAabbBins& bins, const Vec3& origin, const Vec3& dir,
+                       bool (*visit)(int, void*), void* ctx) {
     if (bins.tris == nullptr || bins.tris->empty()) {
-        return result;
+        return;
+    }
+    // Per-thread "already visited on this ray" stamps (a triangle is
+    // registered in every bin its AABB overlaps, so the walk meets it
+    // repeatedly); a fresh stamp value per ray, so no clearing.
+    thread_local std::vector<std::uint32_t> seen;
+    thread_local std::uint32_t stamp = 0;
+    if (seen.size() < bins.tris->size()) seen.resize(bins.tris->size(), 0);
+    if (++stamp == 0) {
+        std::fill(seen.begin(), seen.end(), 0);
+        stamp = 1;
     }
     // Slab test: clip the semi-infinite ray (t >= 0) to the bins' overall
     // box. No triangle lies outside this box (every triangle's AABB is
@@ -204,7 +295,7 @@ std::vector<int> queryRayTriangles(const TriangleAabbBins& bins, const Vec3& ori
     for (int ax = 0; ax < 3; ++ax) {
         if (std::fabs(d[ax]) < 1e-300) {
             if (o[ax] < loP[ax] || o[ax] > hiP[ax]) {
-                return result; // parallel to this axis, outside the slab
+                return; // parallel to this axis, outside the slab
             }
             continue;
         }
@@ -214,11 +305,11 @@ std::vector<int> queryRayTriangles(const TriangleAabbBins& bins, const Vec3& ori
         tmin = std::max(tmin, t0);
         tmax = std::min(tmax, t1);
         if (tmin > tmax) {
-            return result;
+            return;
         }
     }
     if (tmax < 0.0) {
-        return result;
+        return;
     }
     tmin = std::max(tmin, 0.0);
 
@@ -258,7 +349,9 @@ std::vector<int> queryRayTriangles(const TriangleAabbBins& bins, const Vec3& ori
         const std::size_t idx = static_cast<std::size_t>(ix) + static_cast<std::size_t>(iy) * bins.nx +
                                  static_cast<std::size_t>(iz) * bins.nx * bins.ny;
         for (int t : bins.bins[idx]) {
-            result.push_back(t);
+            if (seen[static_cast<std::size_t>(t)] == stamp) continue;
+            seen[static_cast<std::size_t>(t)] = stamp;
+            if (!visit(t, ctx)) return;
         }
         // Stop once we've walked past the box exit (tmax).
         const double nextT = std::min({tMaxX, tMaxY, tMaxZ});
@@ -276,9 +369,6 @@ std::vector<int> queryRayTriangles(const TriangleAabbBins& bins, const Vec3& ori
             tMaxZ += tDeltaZ;
         }
     }
-    std::sort(result.begin(), result.end());
-    result.erase(std::unique(result.begin(), result.end()), result.end());
-    return result;
 }
 
 bool anyTriangleWithin(const TriangleAabbBins& bins, const Vec3& p, double d) {
@@ -299,9 +389,22 @@ bool anyTriangleWithin(const TriangleAabbBins& bins, const Vec3& p, double d) {
     const int by1 = aabbBinIndex1D(qhi.y + epy, bins.lo.y, bins.cellSize.y, bins.ny);
     const int bz0 = aabbBinIndex1D(qlo.z - epz, bins.lo.z, bins.cellSize.z, bins.nz);
     const int bz1 = aabbBinIndex1D(qhi.z + epz, bins.lo.z, bins.cellSize.z, bins.nz);
+    // Squared gap from p to a bin's slab along one axis (0 inside, less
+    // the same 1e-6 cell pad the insertion uses); bins wholly farther
+    // than d hold no triangle within d and are skipped, which turns the
+    // scanned cube into a ball.
+    auto gapSq = [](double x, double lo, double w, int b) {
+        const double g = std::max({lo + b * w - x, x - (lo + (b + 1) * w), 0.0}) - (w * 1e-6 + 1e-12);
+        return g > 0.0 ? g * g : 0.0;
+    };
     for (int bz = bz0; bz <= bz1; ++bz) {
+        const double gz = gapSq(p.z, bins.lo.z, bins.cellSize.z, bz);
+        if (gz > dSq) continue;
         for (int by = by0; by <= by1; ++by) {
+            const double gyz = gz + gapSq(p.y, bins.lo.y, bins.cellSize.y, by);
+            if (gyz > dSq) continue;
             for (int bx = bx0; bx <= bx1; ++bx) {
+                if (gyz + gapSq(p.x, bins.lo.x, bins.cellSize.x, bx) > dSq) continue;
                 const std::size_t idx = static_cast<std::size_t>(bx) + static_cast<std::size_t>(by) * bins.nx +
                                          static_cast<std::size_t>(bz) * bins.nx * bins.ny;
                 for (int t : bins.bins[idx]) {
@@ -396,7 +499,7 @@ std::vector<double> smoothedSignedDistanceBatch(const TriangleAabbBins& bins, co
     // ONE batched parity classification over the whole stencil (the
     // exact ray test, `CutData.cpp`'s `classifyVertices` -- see
     // Geometry.hpp's comment for why this must not be re-implemented).
-    const std::vector<bool> stencilSolid = classifyVertices(stencil, tris, locationInMesh);
+    const std::vector<bool> stencilSolid = classifyVertices(stencil, tris, locationInMesh, &bins);
 
     // Exact closest-point-on-soup query per stencil point (unbatched --
     // only the SIGN needs batching; the distance query
@@ -454,73 +557,15 @@ ClosestHit closestPointOnSoup(const TriangleAabbBins& bins, const Vec3& p) {
     if (bins.tris == nullptr || bins.tris->empty()) {
         return best;
     }
-
-    const int bx = aabbBinIndex1D(p.x, bins.lo.x, bins.cellSize.x, bins.nx);
-    const int by = aabbBinIndex1D(p.y, bins.lo.y, bins.cellSize.y, bins.ny);
-    const int bz = aabbBinIndex1D(p.z, bins.lo.z, bins.cellSize.z, bins.nz);
-
-    auto testBin = [&](int ix, int iy, int iz) {
-        if (ix < 0 || ix >= bins.nx || iy < 0 || iy >= bins.ny || iz < 0 || iz >= bins.nz) {
-            return;
+    visitNearTriangles(bins, p, best.distSq, [&](int t) {
+        Vec3 closest;
+        const double dSq = pointTriDistSq(p, (*bins.tris)[static_cast<std::size_t>(t)], &closest);
+        if (dSq < best.distSq || (dSq == best.distSq && t < best.triangle)) {
+            best.distSq = dSq;
+            best.point = closest;
+            best.triangle = t;
         }
-        const std::size_t idx = static_cast<std::size_t>(ix) + static_cast<std::size_t>(iy) * bins.nx +
-                                 static_cast<std::size_t>(iz) * bins.nx * bins.ny;
-        for (int t : bins.bins[idx]) {
-            Vec3 closest;
-            const double dSq = pointTriDistSq(p, (*bins.tris)[static_cast<std::size_t>(t)], &closest);
-            if (dSq < best.distSq || (dSq == best.distSq && t < best.triangle)) {
-                best.distSq = dSq;
-                best.point = closest;
-                best.triangle = t;
-            }
-        }
-    };
-
-    // Ring 0: the query point's own (clamped) bin.
-    testBin(bx, by, bz);
-
-    int prevX0 = bx, prevX1 = bx, prevY0 = by, prevY1 = by, prevZ0 = bz, prevZ1 = bz;
-    const int maxRadius = std::max({bins.nx, bins.ny, bins.nz});
-    for (int r = 1; r <= maxRadius; ++r) {
-        const int x0 = std::max(0, bx - r), x1 = std::min(bins.nx - 1, bx + r);
-        const int y0 = std::max(0, by - r), y1 = std::min(bins.ny - 1, by + r);
-        const int z0 = std::max(0, bz - r), z1 = std::min(bins.nz - 1, bz + r);
-
-        // Visit only the NEW bins in this ring (box(r) minus box(r-1)) --
-        // iterate the full box and skip anything already inside the
-        // previous (smaller) box, which is cheap at this project's bin
-        // counts and keeps the logic simple/obviously-correct.
-        for (int iz = z0; iz <= z1; ++iz) {
-            for (int iy = y0; iy <= y1; ++iy) {
-                for (int ix = x0; ix <= x1; ++ix) {
-                    const bool wasVisited = ix >= prevX0 && ix <= prevX1 && iy >= prevY0 && iy <= prevY1 &&
-                                             iz >= prevZ0 && iz <= prevZ1;
-                    if (wasVisited) {
-                        continue;
-                    }
-                    testBin(ix, iy, iz);
-                }
-            }
-        }
-        prevX0 = x0; prevX1 = x1; prevY0 = y0; prevY1 = y1; prevZ0 = z0; prevZ1 = z1;
-
-        // Pruning check (see the correctness argument in Geometry.hpp):
-        // the world-space box covered by bins visited so far.
-        const Vec3 boxLo{bins.lo.x + x0 * bins.cellSize.x, bins.lo.y + y0 * bins.cellSize.y,
-                          bins.lo.z + z0 * bins.cellSize.z};
-        const Vec3 boxHi{bins.lo.x + (x1 + 1) * bins.cellSize.x, bins.lo.y + (y1 + 1) * bins.cellSize.y,
-                          bins.lo.z + (z1 + 1) * bins.cellSize.z};
-        const double boundaryDist = std::min({p.x - boxLo.x, boxHi.x - p.x, p.y - boxLo.y, boxHi.y - p.y,
-                                               p.z - boxLo.z, boxHi.z - p.z});
-        const bool boxCoversGrid = x0 == 0 && x1 == bins.nx - 1 && y0 == 0 && y1 == bins.ny - 1 && z0 == 0 &&
-                                    z1 == bins.nz - 1;
-        if (boxCoversGrid) {
-            break; // nothing left to visit
-        }
-        if (best.triangle >= 0 && boundaryDist > 0.0 && boundaryDist * boundaryDist >= best.distSq) {
-            break; // no unvisited bin can hold a closer triangle
-        }
-    }
+    });
     return best;
 }
 

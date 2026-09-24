@@ -578,14 +578,9 @@ struct RawCellData {
 // IDENTICAL per-triangle arithmetic (pointTriDistSq, exact `==`
 // comparison for ties), only visiting fewer triangles.
 //
-// Pruning: the same expanding-ring / AABB-bin argument as
-// closestPointOnSoup (see Geometry.hpp), with one deliberate
-// tightening -- the stop test is STRICT (`boundaryDist^2 > best`, not
-// `>=`). A triangle outside the visited box is only provably
-// UNINTERESTING when it cannot even TIE the current best, since a tie
-// at a lower ordinal would change the answer; strict `>` gives exactly
-// that (outside distance >= boundaryDist > sqrt(best)), at the cost of
-// at most one extra ring.
+// Pruning: the BVH walk of closestPointOnSoup (visitNearTriangles),
+// which never prunes a triangle that could TIE the current best -- a
+// tie at a lower ordinal would change the answer.
 struct NearestSolid {
     double distSq = std::numeric_limits<double>::max();
     int solid = 0;
@@ -596,75 +591,18 @@ NearestSolid nearestSolidOnSoup(const TriangleAabbBins& bins, const Vec3& p) {
     if (bins.tris == nullptr || bins.tris->empty()) {
         return best;
     }
-    const auto binIndex1D = [](double v, double lo, double cs, int n) {
-        int i = static_cast<int>((v - lo) / cs);
-        if (i < 0) {
-            i = 0;
-        }
-        if (i >= n) {
-            i = n - 1;
-        }
-        return i;
-    };
-    const int bx = binIndex1D(p.x, bins.lo.x, bins.cellSize.x, bins.nx);
-    const int by = binIndex1D(p.y, bins.lo.y, bins.cellSize.y, bins.ny);
-    const int bz = binIndex1D(p.z, bins.lo.z, bins.cellSize.z, bins.nz);
-
     bool found = false;
-    auto testBin = [&](int ix, int iy, int iz) {
-        if (ix < 0 || ix >= bins.nx || iy < 0 || iy >= bins.ny || iz < 0 || iz >= bins.nz) {
-            return;
+    visitNearTriangles(bins, p, best.distSq, [&](int t) {
+        const Triangle& tri = (*bins.tris)[static_cast<std::size_t>(t)];
+        const double dSq = pointTriDistSq(p, tri);
+        if (dSq < best.distSq) {
+            best.distSq = dSq;
+            best.solid = tri.solidId;
+            found = true;
+        } else if (dSq == best.distSq && found && tri.solidId < best.solid) {
+            best.solid = tri.solidId;
         }
-        const std::size_t idx = static_cast<std::size_t>(ix) + static_cast<std::size_t>(iy) * bins.nx +
-                                 static_cast<std::size_t>(iz) * bins.nx * bins.ny;
-        for (int t : bins.bins[idx]) {
-            const Triangle& tri = (*bins.tris)[static_cast<std::size_t>(t)];
-            const double dSq = pointTriDistSq(p, tri);
-            if (dSq < best.distSq) {
-                best.distSq = dSq;
-                best.solid = tri.solidId;
-                found = true;
-            } else if (dSq == best.distSq && found && tri.solidId < best.solid) {
-                best.solid = tri.solidId;
-            }
-        }
-    };
-
-    testBin(bx, by, bz);
-    int prevX0 = bx, prevX1 = bx, prevY0 = by, prevY1 = by, prevZ0 = bz, prevZ1 = bz;
-    const int maxRadius = std::max({bins.nx, bins.ny, bins.nz});
-    for (int r = 1; r <= maxRadius; ++r) {
-        const int x0 = std::max(0, bx - r), x1 = std::min(bins.nx - 1, bx + r);
-        const int y0 = std::max(0, by - r), y1 = std::min(bins.ny - 1, by + r);
-        const int z0 = std::max(0, bz - r), z1 = std::min(bins.nz - 1, bz + r);
-        for (int iz = z0; iz <= z1; ++iz) {
-            for (int iy = y0; iy <= y1; ++iy) {
-                for (int ix = x0; ix <= x1; ++ix) {
-                    if (ix >= prevX0 && ix <= prevX1 && iy >= prevY0 && iy <= prevY1 && iz >= prevZ0 &&
-                        iz <= prevZ1) {
-                        continue;
-                    }
-                    testBin(ix, iy, iz);
-                }
-            }
-        }
-        prevX0 = x0; prevX1 = x1; prevY0 = y0; prevY1 = y1; prevZ0 = z0; prevZ1 = z1;
-
-        const Vec3 boxLo{bins.lo.x + x0 * bins.cellSize.x, bins.lo.y + y0 * bins.cellSize.y,
-                          bins.lo.z + z0 * bins.cellSize.z};
-        const Vec3 boxHi{bins.lo.x + (x1 + 1) * bins.cellSize.x, bins.lo.y + (y1 + 1) * bins.cellSize.y,
-                          bins.lo.z + (z1 + 1) * bins.cellSize.z};
-        const double boundaryDist = std::min({p.x - boxLo.x, boxHi.x - p.x, p.y - boxLo.y, boxHi.y - p.y,
-                                               p.z - boxLo.z, boxHi.z - p.z});
-        const bool boxCoversGrid = x0 == 0 && x1 == bins.nx - 1 && y0 == 0 && y1 == bins.ny - 1 && z0 == 0 &&
-                                    z1 == bins.nz - 1;
-        if (boxCoversGrid) {
-            break;
-        }
-        if (found && boundaryDist > 0.0 && boundaryDist * boundaryDist > best.distSq) {
-            break;
-        }
-    }
+    });
     return best;
 }
 

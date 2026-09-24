@@ -42,7 +42,19 @@ double pointTriDistSq(const Vec3& p, const Triangle& tri, Vec3* closestOut = nul
 // overlapping its own (padded) region is guaranteed to find every
 // triangle whose AABB could possibly intersect it — a strict superset of
 // the brute-force candidate set, never a subset. The bin grid is a "dumb
-// uniform grid" (no kd-tree/BVH).
+// uniform grid"; nearest-point queries use the BVH built alongside it.
+//
+// BVH node: the exact AABB of its triangles; a leaf when `count > 0`
+// (triangles bvhTris[first, first+count)), else children `left`/`right`.
+struct TriangleBvhNode {
+    Vec3 lo{0, 0, 0};
+    Vec3 hi{0, 0, 0};
+    int left = -1;
+    int right = -1;
+    int first = 0;
+    int count = 0;
+};
+
 struct TriangleAabbBins {
     Vec3 lo{0, 0, 0};
     Vec3 hi{0, 0, 0};
@@ -52,7 +64,56 @@ struct TriangleAabbBins {
     Vec3 cellSize{1, 1, 1};
     std::vector<std::vector<int>> bins; // triangle indices, size nx*ny*nz
     const std::vector<Triangle>* tris = nullptr;
+    std::vector<TriangleBvhNode> bvh; // root at 0 (empty for an empty soup)
+    std::vector<int> bvhTris;         // triangle indices in leaf order
 };
+
+// Squared distance from p to an axis-aligned box (0 inside).
+inline double pointBoxDistSq(const Vec3& p, const Vec3& lo, const Vec3& hi) {
+    const double dx = p.x < lo.x ? lo.x - p.x : (p.x > hi.x ? p.x - hi.x : 0.0);
+    const double dy = p.y < lo.y ? lo.y - p.y : (p.y > hi.y ? p.y - hi.y : 0.0);
+    const double dz = p.z < lo.z ? lo.z - p.z : (p.z > hi.z ? p.z - hi.z : 0.0);
+    return dx * dx + dy * dy + dz * dz;
+}
+
+// Exact nearest-candidate walk over the BVH: calls consider(t) for every
+// triangle t whose box is not STRICTLY farther from p than `boundSq`, the
+// caller's current best squared distance, re-read before every prune
+// (so the caller tightens it inside `consider`). Nearer child first. The
+// prune keeps a 1e-12 relative margin so a triangle that could TIE the
+// best is always visited -- callers break ties by index, which then
+// stays independent of visit order.
+template <class Consider>
+void visitNearTriangles(const TriangleAabbBins& bins, const Vec3& p, const double& boundSq, Consider consider) {
+    if (bins.bvh.empty()) return;
+    auto pruned = [&](const TriangleBvhNode& n, double dSq) {
+        (void)n;
+        return dSq > boundSq * (1.0 + 1e-12) + 1e-300;
+    };
+    int stack[128];
+    int top = 0;
+    stack[top++] = 0;
+    while (top > 0) {
+        const TriangleBvhNode& n = bins.bvh[static_cast<std::size_t>(stack[--top])];
+        if (pruned(n, pointBoxDistSq(p, n.lo, n.hi))) continue;
+        if (n.count > 0) {
+            for (int k = n.first; k < n.first + n.count; ++k) consider(bins.bvhTris[static_cast<std::size_t>(k)]);
+            continue;
+        }
+        const TriangleBvhNode& a = bins.bvh[static_cast<std::size_t>(n.left)];
+        const TriangleBvhNode& b = bins.bvh[static_cast<std::size_t>(n.right)];
+        const double da = pointBoxDistSq(p, a.lo, a.hi);
+        const double db = pointBoxDistSq(p, b.lo, b.hi);
+        // push the farther first so the nearer is visited first
+        if (da <= db) {
+            stack[top++] = n.right;
+            stack[top++] = n.left;
+        } else {
+            stack[top++] = n.left;
+            stack[top++] = n.right;
+        }
+    }
+}
 
 // Builds an AABB-based bin grid over `tris`' bounding box, aiming for
 // roughly `targetTrisPerBin` triangles per bin (AABB-overlap insertion
@@ -85,7 +146,11 @@ std::vector<int> queryAabbTriangles(const TriangleAabbBins& bins, const Vec3& lo
 // intersection point (or a bin adjacent to it if the hit is exactly on a
 // bin boundary -- covered by the same padding used for AABB insertion),
 // so it is visited. Returns empty if the ray misses the box entirely.
-std::vector<int> queryRayTriangles(const TriangleAabbBins& bins, const Vec3& origin, const Vec3& dir);
+// Walks the bins the ray crosses (the same DDA over the same superset)
+// and calls visit(t, ctx) ONCE per distinct triangle met, in walk order,
+// until it returns false.
+void visitRayTriangles(const TriangleAabbBins& bins, const Vec3& origin, const Vec3& dir,
+                       bool (*visit)(int, void*), void* ctx);
 
 // Exact early-exit within-distance predicate (serving Refine.cpp's
 // surface-rule marking): true iff at least one triangle in
@@ -119,35 +184,9 @@ struct ClosestHit {
 // Exact nearest point (and owning triangle) on the soup registered in
 // `bins`, to query point `p`. Deterministic tie-break: among triangles at
 // exactly equal distSq, the LOWEST triangle index wins (checked via
-// explicit index comparison in the scan below, independent of bin visit
-// order).
+// explicit index comparison, independent of visit order).
 //
-// Algorithm: expanding-ring search over the AABB bin grid, seeded by the
-// bin size. Ring r (r=0,1,2,...) visits exactly the shell of bins whose
-// clamped-to-grid index box grew relative to ring r-1 (ring 0 is the
-// query point's own bin). After each ring, every triangle visited so far
-// is a candidate; a further ring may only be explored if it could still
-// contain a strictly closer triangle.
-//
-// Pruning-correctness argument: after ring r, all visited bins together
-// cover a world-space box B (the clamped bin-index box converted to
-// coordinates, using the SAME bin grid `buildTriangleAabbBins` used to
-// register every triangle by full AABB-overlap, per its own superset
-// argument above). Any triangle registered in a bin OUTSIDE B has its
-// AABB overlapping ONLY bins outside B (by the registration rule), so no
-// point of that triangle can lie inside B's interior at a distance from
-// `p` less than the distance from `p` to B's own boundary -- because
-// getting from `p` (which is inside B, since B always contains p's own
-// bin) to any point outside B requires crossing B's boundary along at
-// least one axis, whose distance is exactly
-// min(p.x - B.lo.x, B.hi.x - p.x, p.y - B.lo.y, B.hi.y - p.y,
-//     p.z - B.lo.z, B.hi.z - p.z).
-// If that minimum boundary distance, squared, is >= the current best
-// distSq, every unvisited triangle (whose AABB lies entirely outside B)
-// is guaranteed no closer than the current best, so the search may stop.
-// This is the standard "distance to unexplored region" ring-pruning
-// argument for uniform-grid nearest-neighbour search, specialized to
-// this project's AABB-overlap bin registration.
+// Algorithm: exact nearest search over the BVH (visitNearTriangles).
 ClosestHit closestPointOnSoup(const TriangleAabbBins& bins, const Vec3& p);
 
 // --- The smoothed signed distance field -------------------------------

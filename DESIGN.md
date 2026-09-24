@@ -541,7 +541,7 @@ just not a model of that spillway any more, and `wallArea`,
 | Vertex classification, edge intercepts, half-grid | `src/CutData.cpp` |
 | Cut, sliver merge, flap repair, planarize | `src/Cutter.cpp` |
 | Layer march, smoothing, prism validation | `src/Layers.cpp` |
-| Closest-point / distance queries, AABB bins | `src/Geometry.cpp` |
+| Closest-point / distance queries, AABB bins, BVH | `src/Geometry.cpp` |
 | OpenFOAM `polyMesh` output | `src/FoamWriter.cpp` |
 
 The headers carry the design rationale; the `.cpp` files carry the

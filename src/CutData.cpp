@@ -97,33 +97,41 @@ bool rayTriangle(const Vec3& origin, const Vec3& dir, const Triangle& tri, doubl
 }
 
 // Ray-parity crossing count from `origin` in direction `dir`, over the
-// candidate triangle indices `idxs` (a superset of every triangle the
-// ray could geometrically hit, per queryRayTriangles' binning -- see
-// Geometry.hpp). Returns {count, ok}; ok=false means a degenerate hit
-// occurred and the caller should retry with the next direction.
+// triangles of the bins the ray crosses (a superset of every triangle
+// the ray could geometrically hit -- see Geometry.hpp's
+// visitRayTriangles). Returns {count, ok}; ok=false means a degenerate
+// hit occurred and the caller should retry with the next direction.
 std::pair<int, bool> parityCount(const Vec3& origin, const Vec3& dir, const std::vector<Triangle>& tris,
-                                  const std::vector<int>& idxs) {
-    int count = 0;
-    for (int i : idxs) {
-        const Triangle& tri = tris[static_cast<std::size_t>(i)];
+                                  const TriangleAabbBins& bins) {
+    struct Ctx {
+        const Vec3* origin;
+        const Vec3* dir;
+        const std::vector<Triangle>* tris;
+        int count;
+        bool ok;
+    } c{&origin, &dir, &tris, 0, true};
+    // The count and the degenerate verdict do not depend on the order the
+    // candidates are met, so the first degenerate graze ends the ray.
+    visitRayTriangles(bins, origin, dir, [](int i, void* vp) {
+        Ctx& k = *static_cast<Ctx*>(vp);
         double t = 0.0;
         bool degenerate = false;
-        const bool hit = rayTriangle(origin, dir, tri, t, degenerate);
+        const bool hit = rayTriangle(*k.origin, *k.dir, (*k.tris)[static_cast<std::size_t>(i)], t, degenerate);
         if (degenerate) {
-            return {0, false};
+            k.ok = false;
+            return false;
         }
-        if (hit && t > kEps) {
-            ++count;
-        }
-    }
-    return {count, true};
+        if (hit && t > kEps) ++k.count;
+        return true;
+    }, &c);
+    return c.ok ? std::pair<int, bool>{c.count, true} : std::pair<int, bool>{0, false};
 }
 
 // `bins` is an AABB-based accelerator over the SAME `tris` (see
-// Geometry.hpp's TriangleAabbBins/queryRayTriangles): for each fixed
+// Geometry.hpp's TriangleAabbBins/visitRayTriangles): for each fixed
 // fallback direction, only the triangles whose bins the ray's path
 // actually crosses are tested, instead of the full soup. Exactness:
-// queryRayTriangles returns a superset of every triangle the ray could
+// visitRayTriangles walks a superset of every triangle the ray could
 // hit (see its docstring), so `count` here is bit-identical to the old
 // full-soup scan -- WHICH triangles get tested changes, HOW they get
 // tested (rayTriangle, epsilons, tie-breaking) does not.
@@ -174,8 +182,7 @@ bool isSolidAt(const Vec3& p, const std::vector<Triangle>& tris, const TriangleA
     bool haveFirst = false;
     bool firstSolid = false;
     for (const Vec3& d : fallbackDirections()) {
-        const std::vector<int> candidates = queryRayTriangles(bins, p, d);
-        auto [count, ok] = parityCount(p, d, tris, candidates);
+        auto [count, ok] = parityCount(p, d, tris, bins);
         if (!ok) {
             continue; // degenerate ray: no vote, try the next direction
         }
@@ -298,7 +305,7 @@ bool isOnSurface(const Vec3& p, const std::vector<Triangle>& tris, const Triangl
 } // namespace
 
 std::vector<bool> classifyVertices(const std::vector<Vec3>& points, const std::vector<Triangle>& tris,
-                                    const Vec3& locationInMesh) {
+                                    const Vec3& locationInMesh, const TriangleAabbBins* prebuilt) {
     // AABB-based triangle binning accelerator (see Geometry.hpp) --
     // replaces an O(nVertices x nTriangles) brute-force scan with
     // per-query candidate lists that are a provable superset of the
@@ -306,7 +313,9 @@ std::vector<bool> classifyVertices(const std::vector<Vec3>& points, const std::v
     // per call (shared by every vertex/ray below), same "single query
     // structure per shared computation" discipline as the rest of
     // CutData.cpp.
-    const TriangleAabbBins bins = buildTriangleAabbBins(tris);
+    TriangleAabbBins own;
+    if (prebuilt == nullptr) own = buildTriangleAabbBins(tris);
+    const TriangleAabbBins& bins = prebuilt != nullptr ? *prebuilt : own;
     const bool locationSolid = isSolidAt(locationInMesh, tris, bins);
     // See inputPrecisionBand()'s docstring above: a grid vertex within
     // this band of the surface used to classify FLUID (float32 STL

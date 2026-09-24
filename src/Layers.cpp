@@ -1569,7 +1569,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
             if (!crossing.empty()) {
                 const std::vector<bool> solidThere =
-                    classifyVertices(crossedTo, perStlTris[static_cast<std::size_t>(spec.stlIndex)], locationInMesh);
+                    classifyVertices(crossedTo, perStlTris[static_cast<std::size_t>(spec.stlIndex)], locationInMesh, &bins);
                 for (std::size_t k = 0; k < crossing.size(); ++k) {
                     if (solidThere[k]) continue;
                     stepLen[crossing[k]] = std::sqrt(exactHit[crossing[k]].distSq);
@@ -2048,7 +2048,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 phiExact[i] = std::sqrt(closestPointOnSoup(bins, landedPts[i]).distSq);
             }
             const std::vector<bool> landedSolid =
-                classifyVertices(landedPts, perStlTris[static_cast<std::size_t>(spec.stlIndex)], locationInMesh);
+                classifyVertices(landedPts, perStlTris[static_cast<std::size_t>(spec.stlIndex)], locationInMesh, &bins);
             for (std::size_t i = 0; i < nFront; ++i) {
                 if (landedSolid[i]) phiExact[i] = -phiExact[i];
             }
@@ -2148,7 +2148,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                     phiTop[k] = std::sqrt(closestPointOnSoup(bins, topPts[k]).distSq);
                 }
                 const std::vector<bool> topSolid =
-                    classifyVertices(topPts, perStlTris[static_cast<std::size_t>(spec.stlIndex)], locationInMesh);
+                    classifyVertices(topPts, perStlTris[static_cast<std::size_t>(spec.stlIndex)], locationInMesh, &bins);
                 for (int fi = 0; fi < nTop; ++fi) {
                     if (!faceSealed[static_cast<std::size_t>(fi)]) continue;
                     const double hLocal = dx0 / static_cast<double>(1 << levelOfCell(wallBucket.owner[static_cast<std::size_t>(fi)]));

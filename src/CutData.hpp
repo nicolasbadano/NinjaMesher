@@ -16,6 +16,8 @@
 
 namespace ninja {
 
+struct TriangleAabbBins; // Geometry.hpp
+
 // --- small Vec3 arithmetic, shared by CutData and Cutter -----------------
 inline Vec3 operator+(const Vec3& a, const Vec3& b) { return Vec3{a.x + b.x, a.y + b.y, a.z + b.z}; }
 inline Vec3 operator-(const Vec3& a, const Vec3& b) { return Vec3{a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -88,9 +90,11 @@ struct CutData {
 // caller doesn't need to know the STL's winding convention. `tris` may
 // be the combined triangle soup of several STLs (union of solids,
 // ) — classification does not need to know
-// which solid each triangle belongs to.
+// which solid each triangle belongs to. `prebuilt`, when given, must be
+// buildTriangleAabbBins(tris) (default arguments) -- it saves rebuilding
+// it on every call.
 std::vector<bool> classifyVertices(const std::vector<Vec3>& points, const std::vector<Triangle>& tris,
-                                    const Vec3& locationInMesh);
+                                    const Vec3& locationInMesh, const TriangleAabbBins* prebuilt = nullptr);
 
 // Computes shared intercepts for every edge in `edges` (pairs of point
 // indices into `points`) whose endpoint statuses differ.
