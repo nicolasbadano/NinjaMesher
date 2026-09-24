@@ -1059,6 +1059,7 @@ void printCutStats(const ninja::CutStats& s) {
               << "  mergeRefusedGeometry = " << s.mergeRefusedGeometry << "\n"
               << "  mergeReselectedSkew = " << s.mergeReselectedSkew << "\n"
               << "  mergeRefusedSkew = " << s.mergeRefusedSkew << "\n"
+              << "  mergeKeptOverSkew = " << s.mergeKeptOverSkew << "\n"
               << "  mergeRefusedWallArea = " << s.mergeRefusedWallArea << "\n"
               << "  disconnectedCellsDropped = " << s.disconnectedCellsDropped << "\n"
               << "  discardedComponents  = " << s.discardedComponents << "\n"
@@ -1793,6 +1794,7 @@ int main(int argc, char** argv) {
                 std::cout << "mergeRefusedGeometry = " << res.cutStats.mergeRefusedGeometry << "\n";
                 std::cout << "mergeReselectedSkew = " << res.cutStats.mergeReselectedSkew << "\n";
                 std::cout << "mergeRefusedSkew = " << res.cutStats.mergeRefusedSkew << "\n";
+                std::cout << "mergeKeptOverSkew = " << res.cutStats.mergeKeptOverSkew << "\n";
                 std::cout << "mergeRefusedWallArea = " << res.cutStats.mergeRefusedWallArea << "\n";
                 // Smoothed-field stats: all zero when smoothRadius is 0.
                 if (verbose) {

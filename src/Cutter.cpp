@@ -2333,6 +2333,23 @@ void mergeSlivers(GeneratedMesh& mesh, std::vector<int>& cellLevel, std::vector<
     stats.mergeRefusedWallArea = 0.0;
     stats.mergeReselectedSkew = 0;
     stats.mergeRefusedSkew = 0;
+    stats.mergeKeptOverSkew = 0;
+    // Whether a sliver left unmerged can ship as its own cell. Boundary
+    // skewness too: cutMesh's post-pass leaves slivers to this function, and
+    // an unmerged one was scored by neither gate.
+    auto sliverValidAlone = [&mesh](int c) {
+        const std::vector<std::vector<int>> ownLoops = ownedLoopsOf(mesh, c);
+        if (!cellGeometryIsValid(ownLoops, mesh.points)) return false;
+        const Vec3 cc = cellCentreOpenFoam(ownLoops, mesh.points);
+        for (int fi : mesh.cellFacesOf(c)) {
+            if (mesh.faces.patchId[static_cast<std::size_t>(fi)] < 0) continue;
+            const IntSpan bp = mesh.faces.pointsOf(fi);
+            if (boundaryFaceSkewness(std::vector<int>(bp.begin(), bp.end()), mesh.points, cc) > kMaxBoundarySkew) {
+                return false;
+            }
+        }
+        return true;
+    };
     std::set<int> refusedRoots;
     // `reselectedPartner` maps a sliver whose ORIGINAL pairing failed the
     // post-merge skew bound (below) onto the anchor it was re-paired with.
@@ -2458,6 +2475,8 @@ void mergeSlivers(GeneratedMesh& mesh, std::vector<int>& cellLevel, std::vector<
         // (parent: 45 faces/4.72889 -> 7 faces/4.04765) without touching
         // unrelated geometry's already-validated behaviour.
         constexpr double kMergeSkewBound = 3.0;
+        constexpr double kMergeSkewFallback = 3.8;
+        std::set<int> keptOverSkew;
         // MEASURED necessary (first single-pass attempt on
         // win_fish_coarse_skew2 left 13/16 skew faces at max 4.04121,
         // still above checkMesh's 4.0): a group's OWN skew depends on its
@@ -2502,6 +2521,20 @@ void mergeSlivers(GeneratedMesh& mesh, std::vector<int>& cellLevel, std::vector<
                 const Vec3 gc = groupCentroidOf.at(root);
                 const double sk = mergedGroupMaxFaceSkew(mesh, members, gc, centroidOfCell);
                 if (sk < kMergeSkewBound) continue;
+                // Refusing would delete a sliver that cannot stand alone, and
+                // the deletion turns its grid faces into wall: a notch whose
+                // risers never take layers (MEASURED on a hydrofoil, the
+                // stacks dropped in runs along level 5/6 transitions, where a
+                // coarse cell takes the fine band and its wedge sliver meets
+                // a coarse partner at skew 3.2). A merge under
+                // kMergeSkewFallback still clears checkMesh's 4.0, so keep it.
+                if (sk < kMergeSkewFallback && members.size() == 2) {
+                    const int sliverC = isSliver[static_cast<std::size_t>(members[0])] ? members[0] : members[1];
+                    if (!sliverValidAlone(sliverC)) {
+                        keptOverSkew.insert(root);
+                        continue;
+                    }
+                }
 
                 // Attempt reselection: 2-member groups only
                 // (measured: the dominant shape of this family is actually
@@ -2569,6 +2602,9 @@ void mergeSlivers(GeneratedMesh& mesh, std::vector<int>& cellLevel, std::vector<
                 }
             }
         }
+        for (int root : keptOverSkew) {
+            if (!refusedRoots.count(root)) ++stats.mergeKeptOverSkew;
+        }
     }
 
     // A sliver left UNMERGED (no partner, or every candidate merge refused)
@@ -2588,22 +2624,7 @@ void mergeSlivers(GeneratedMesh& mesh, std::vector<int>& cellLevel, std::vector<
     for (int c = 0; c < nCells; ++c) {
         if (!isSliver[static_cast<std::size_t>(c)] || removed[static_cast<std::size_t>(c)] || groupRoot(c) != c) continue;
         if (rootOfOthers[static_cast<std::size_t>(c)]) continue;
-        // Boundary skewness too: cutMesh's post-pass leaves slivers to this
-        // function, and an unmerged one was scored by neither gate.
-        const std::vector<std::vector<int>> ownLoops = ownedLoopsOf(mesh, c);
-        bool valid = cellGeometryIsValid(ownLoops, mesh.points);
-        if (valid) {
-            const Vec3 cc = cellCentreOpenFoam(ownLoops, mesh.points);
-            for (int fi : mesh.cellFacesOf(c)) {
-                if (mesh.faces.patchId[static_cast<std::size_t>(fi)] < 0) continue;
-                const IntSpan bp = mesh.faces.pointsOf(fi);
-                if (boundaryFaceSkewness(std::vector<int>(bp.begin(), bp.end()), mesh.points, cc) > kMaxBoundarySkew) {
-                    valid = false;
-                    break;
-                }
-            }
-        }
-        if (!valid) {
+        if (!sliverValidAlone(c)) {
             removed[static_cast<std::size_t>(c)] = true;
             removedInvalid[static_cast<std::size_t>(c)] = 1;
             ++stats.invalidSliverRemovals;

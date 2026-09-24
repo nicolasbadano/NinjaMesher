@@ -154,6 +154,9 @@ struct CutStats {
     // as mergeRefusedConvexity (members stay their own untouched cells).
     int mergeReselectedSkew = 0;
     int mergeRefusedSkew = 0;
+    // `mergeKeptOverSkew`: a 2-member group between kMergeSkewBound and
+    // kMergeSkewFallback, kept because its sliver would be deleted unmerged.
+    int mergeKeptOverSkew = 0;
     // Layer-feasibility detection: populated by the
     // caller from Layers.cpp's LayerStats after applyLayers runs, same
     // "populated by the caller" pattern as residualMean/residualMax.
