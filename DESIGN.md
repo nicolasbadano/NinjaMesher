@@ -501,11 +501,13 @@ That was tested by sweeping four real-CAD cases over grid factors ×2,
 **It holds on all four cases to ×8**, layers on and off — 24 of 24
 meshes clear checkMesh's whitelist — at dx 0.96 m on a case designed
 at 0.12 m. What degrades is what should: layers retreat from the wall
-monotonically and loudly (`infeasibleWallArea` 0.7 % → 17.0 % → 31.3 %
-of the wall as the grid coarsens ×2 → ×4 → ×8, counted on the fluid
-that is written), the seal guard refuses progressively more landings
-(1.5 → 16.8 → 70.6 m²), non-orthogonality stays under 70° at every
-factor because the march refuses the prisms that would breach it, and the outer
+loudly (`infeasibleWallArea`, summed over the four cases and counted on
+the fluid that is written: 1.3 % → 22.8 % → 23.3 % of the wall as the
+grid coarsens ×2 → ×4 → ×8; 4.5 % → 30.3 % → 36.0 % in 0.2.0), the seal
+guard refuses more landings, non-orthogonality stays under 70° at ×4 and
+×8 because the march refuses the prisms that would breach it (at ×2 two
+cases carry faces to 72.2°, as in 0.2.0; checkMesh warns, it does not
+fail), and the outer
 quality gate stops converging — while the mesh stays valid, because the
 in-march guard reverts a failing prism *before* emission. Non-convergence
 costs layer coverage, not validity.
