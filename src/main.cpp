@@ -827,6 +827,10 @@ void runLayersStage(ninja::GeneratedMesh& mesh, std::vector<int>& cellLevel, std
     stats.qualityDroppedFaces = lr.stats.qualityDroppedFaces;
     stats.droppedByReason = lr.stats.droppedByReason;
     stats.surfaceClampedSteps = lr.stats.surfaceClampedSteps;
+    stats.buriedLandingFaces = lr.stats.buriedLandingFaces;
+    stats.buriedLandingArea = lr.stats.buriedLandingArea;
+    stats.buriedLandingMaxDepth = lr.stats.buriedLandingMaxDepth;
+    stats.buriedLandingMaxDepthOverH = lr.stats.buriedLandingMaxDepthOverH;
     stats.perStepDropped = lr.stats.perStepDropped;
     stats.perStepFrozen = lr.stats.perStepFrozen;
     stats.perStepPrismCells = lr.stats.perStepPrismCells;
@@ -1772,6 +1776,10 @@ int main(int argc, char** argv) {
                 }
                 std::cout << "qualityDroppedFaces = " << res.cutStats.qualityDroppedFaces << "\n";
                 std::cout << "surfaceClampedSteps = " << res.cutStats.surfaceClampedSteps << "\n";
+                std::cout << "buriedLandingFaces = " << res.cutStats.buriedLandingFaces << "\n";
+                std::cout << "buriedLandingArea = " << res.cutStats.buriedLandingArea << "\n";
+                std::cout << "buriedLandingMaxDepth = " << res.cutStats.buriedLandingMaxDepth << " ("
+                          << res.cutStats.buriedLandingMaxDepthOverH << " h)\n";
                 if (res.cutStats.surfaceClampedSteps > 0) {
                     std::cerr << "warning: layers: " << res.cutStats.surfaceClampedSteps
                               << " march step(s) would have carried a front point through a surface into fluid"

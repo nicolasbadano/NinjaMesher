@@ -78,6 +78,10 @@ struct CutStats {
     int qualityDroppedFaces = 0; // in-march quality-guard drops (see LayerStats)
     std::vector<int> droppedByReason; // droppedFaces by first refusal (see LayerStats, LayerDropReason)
     long surfaceClampedSteps = 0;     // see LayerStats
+    long buriedLandingFaces = 0;      // see LayerStats
+    double buriedLandingArea = 0.0;
+    double buriedLandingMaxDepth = 0.0;
+    double buriedLandingMaxDepthOverH = 0.0;
     // Per-march-step observability (raw counts, not
     // de-duplicated); frozenPoints/droppedFaces above are DISTINCT
     // counts. Empty unless a `layers` block is present.

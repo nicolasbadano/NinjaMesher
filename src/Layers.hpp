@@ -100,7 +100,7 @@ enum LayerDropReason : int {
     kDropMeanHeight = 8, // sheared flat
     kDropAspect = 9,
     kDropCollapsed = 10, // achieved height far below the requested step
-    kDropSealed = 11,    // seal guard: the landing would bury the face
+    kDropSealed = 11,    // seal guard: the landing would cross a thin rib
     kDropForced = 12,    // layersDebug forceDropSphere
     kDropPyramid = 13,   // in-march quality guard, by checkMesh metric
     kDropTet = 14,
@@ -201,14 +201,22 @@ struct LayerStats {
     std::vector<SealedRegion> smoothSealedRegions;
 
     // Seal guard: landed wall faces the march REFUSED to
-    // emit because their landed points sat inside the solid by more
-    // than 0.1 * h_local -- the facing-wall crossing that would have
-    // sealed a passage. Same predicate as `smoothSealedRegions` above;
+    // emit because a landed point sat inside the solid by more than
+    // 0.1 * h_local past the midline of a thin rib (its nearest surface is
+    // not the one it approached), or across the surface on the fluid side. Same predicate as `smoothSealedRegions` above;
     // these counters record the ACTION, the regions record the
     // measurement. Per-pass (the gate re-marches); the cumulative
     // figure is printed by applyLayers.
     long sealDroppedFaces = 0;
     double sealDroppedArea = 0.0;
+    // Buried landings: landed wall faces that sit inside the solid by more
+    // than 0.1 * h_local on the side they approached (the smoothed zero
+    // rounding a sharp convex edge) and were EMITTED there. Disclosed, not
+    // refused: the wall is blunted by at most the reported depth.
+    long buriedLandingFaces = 0;
+    double buriedLandingArea = 0.0;
+    double buriedLandingMaxDepth = 0.0;
+    double buriedLandingMaxDepthOverH = 0.0;
 
     // Collapsed-prism guard (achieved vs REQUESTED layer height).
     // Landed prisms the march refused because their ACHIEVED mean

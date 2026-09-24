@@ -1,6 +1,6 @@
 #!/bin/sh
-# Gate for win_desc_slot: the layer march must never bury its own wall
-# face inside the solid.
+# Gate for win_desc_slot: the layer march may land its wall face inside
+# the solid only slightly, on the side it approached.
 #
 # The window is a grid-aligned sub-box of bm_layers_descargador. BEFORE the
 # seal guard the parent shipped 5 sealed regions / 14.977 m2 of landed wall
@@ -10,15 +10,17 @@
 # and the window meshed an inverted region (138.5 m3 of it).
 #
 # Asserted:
-#   * smoothSealedRegionCount == 0 and smoothSealedRegionArea == 0 --
-#     no landed wall face ends up inside the solid,
-#   * the seal guard actually FIRED here (it is a live regression
-#     tripwire, not a dormant one; measured 48 stacks),
+#   * smoothSealedRegionCount == 0 -- no stack is left buried behind a
+#     refused landing,
+#   * the landings inside the plates are reported as buried landings, no
+#     deeper than 0.25 h (a live tripwire, not a dormant one: measured 48
+#     faces, 0.148 h; these 48 stacks were refused a layer short until the
+#     seal guard learned to accept a shallow burial on the approach side),
 #   * the layer-quality gate converged (no "stacks still bad" warning),
 #   * check_integrity.py clean,
 #   * checkMesh -allGeometry: no open cells, misoriented face pyramids,
 #     bad face tets, highly skew faces or high aspect ratio cells,
-#   * total volume within 1% of the measured 53.744 m3,
+#   * total volume within 1% of the measured 53.759 m3,
 #   * determinism: a second np=1 run is byte-identical.
 #
 # Usage: test_descslot.sh <ninjaMesher-exe> <caseDir>
@@ -53,8 +55,17 @@ elif [ "$SC" -ne 0 ]; then
     status=1
 fi
 
-if ! grep -q "^layer seal guard: " "$TMP/run1.log"; then
-    echo "FAIL: the seal guard did not fire (this window exists because it does)"
+BF=$(grep -E "^buriedLandingFaces = " "$TMP/run1.log" | sed -E 's/.*= ([0-9]+).*/\1/' || true)
+BD=$(grep -E "^buriedLandingMaxDepth = " "$TMP/run1.log" | sed -E 's/.*\(([0-9.eE+-]+) h\).*/\1/' || true)
+echo "measured buriedLandingFaces = ${BF:-<missing>}  depth = ${BD:-<missing>} h"
+if [ -z "${BF:-}" ] || [ -z "${BD:-}" ]; then
+    echo "FAIL: no buried-landing disclosure in the mesher output"
+    status=1
+elif [ "$BF" -eq 0 ]; then
+    echo "FAIL: no buried landing (this window exists because the plates bury one)"
+    status=1
+elif ! python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) <= 0.25 else 1)" "$BD"; then
+    echo "FAIL: buried landing $BD h deep, above 0.25 h"
     status=1
 fi
 if grep -q "stacks still bad" "$TMP/run1.log"; then
@@ -89,8 +100,8 @@ echo "measured Total volume = ${VOL:-<missing>}"
 if [ -z "${VOL:-}" ]; then
     echo "FAIL: checkMesh reported no Total volume"
     status=1
-elif ! python3 -c "import sys; v=float(sys.argv[1]); sys.exit(0 if abs(v-53.744)/53.744 <= 0.01 else 1)" "$VOL"; then
-    echo "FAIL: total volume $VOL outside 53.744 +- 1%"
+elif ! python3 -c "import sys; v=float(sys.argv[1]); sys.exit(0 if abs(v-53.759)/53.759 <= 0.01 else 1)" "$VOL"; then
+    echo "FAIL: total volume $VOL outside 53.759 +- 1%"
     status=1
 fi
 

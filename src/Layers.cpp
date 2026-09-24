@@ -690,6 +690,10 @@ double faceNonOrthDegOf(const std::vector<Vec3>& loop, const Vec3& ownCc, const 
 }
 // checkMesh's "severely non-orthogonal" threshold (primitiveMesh::nonOrthThreshold_ = 70).
 constexpr double kNonOrthMaxDeg = 70.0;
+// Deepest a landed point may sit inside the solid and still be emitted
+// (see the seal guard), in units of the face's h_local. Measured maximum
+// 0.2 h on a hydrofoil's sharp edges; the smoothed field bounds it.
+constexpr double kMaxBuriedDepthFrac = 0.25;
 
 // Volume-weighted polyhedron centroid (same pass1/pass2 scheme as
 // cellCentroidOf below), given the cell's faces as loops ALREADY
@@ -2110,12 +2114,15 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             // batched classifyVertices call for the sign -- paid only
             // here, once per wall face, not per march step.
             std::vector<double> phiExact(nFront);
+            std::vector<Vec3> landedClosest(nFront);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 512)
 #endif
             for (std::ptrdiff_t fi = 0; fi < static_cast<std::ptrdiff_t>(nFront); ++fi) {
                 const std::size_t i = static_cast<std::size_t>(fi);
-                phiExact[i] = std::sqrt(closestPointOnSoup(bins, landedPts[i]).distSq);
+                const ClosestHit hit = closestPointOnSoup(bins, landedPts[i]);
+                phiExact[i] = std::sqrt(hit.distSq);
+                landedClosest[i] = hit.point;
             }
             const std::vector<bool> landedSolid =
                 classifyVertices(landedPts, perStlTris[static_cast<std::size_t>(spec.stlIndex)], locationInMesh, &bins);
@@ -2146,7 +2153,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 const double hLocal = dx0 / static_cast<double>(1 << lvl);
                 std::vector<Vec3> loop;
                 loop.reserve(static_cast<std::size_t>(fp.size()));
-                bool moved = false, sealed = false;
+                bool moved = false, sealed = false, buried = false;
                 double faceMaxDiff = 0.0;
                 int prevIdx = -1, firstIdx = -1;
                 for (int p : fp) {
@@ -2169,10 +2176,34 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                     // is the stricter choice: with phiExact < 0 < phiR,
                     // |phiR - phiExact| >= |phiExact| always, so gating on the
                     // difference instead would flag strictly more faces.
+                    //
+                    // A point buried on the side it came from is ACCEPTED: the
+                    // smoothed zero rounds a sharp convex edge and lies inside
+                    // the solid there, which is the landing working as
+                    // designed, only deeper than 0.1*h (MEASURED on a
+                    // hydrofoil: 9095 leading/trailing-edge faces, at most
+                    // 0.2 h deep; on win_desc_slot 48 faces of a plate
+                    // thinner than the smoothing diameter, 0.15 h; refusing
+                    // them left each stack a layer short). It is reported as
+                    // a buried landing. Refused: a point deeper than
+                    // kMaxBuriedDepthFrac * h, a point whose nearest surface
+                    // is no longer the one it approached -- it passed the
+                    // midline of a rib, where the stack landing from the far
+                    // side could cross it -- and, as before, a sign flip on
+                    // the fluid side.
                     const double phiE = phiExact[static_cast<std::size_t>(idx)];
                     if ((phiR[static_cast<std::size_t>(idx)] > 0.0) != (phiE > 0.0) &&
                         std::fabs(phiE) > 0.1 * hLocal) {
-                        sealed = true;
+                        const Vec3& landed = landedPts[static_cast<std::size_t>(idx)];
+                        const Vec3& from = out.points[static_cast<std::size_t>(frontPoints[static_cast<std::size_t>(idx)])];
+                        if (phiE < 0.0 && -phiE <= kMaxBuriedDepthFrac * hLocal &&
+                            dot(landedClosest[static_cast<std::size_t>(idx)] - landed, from - landed) > 0.0) {
+                            buried = true;
+                            stats.buriedLandingMaxDepth = std::max(stats.buriedLandingMaxDepth, -phiE);
+                            stats.buriedLandingMaxDepthOverH = std::max(stats.buriedLandingMaxDepthOverH, -phiE / hLocal);
+                        } else {
+                            sealed = true;
+                        }
                     }
                     if (firstIdx < 0) firstIdx = idx;
                     if (prevIdx >= 0) ufUnion(prevIdx, idx);
@@ -2193,6 +2224,10 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                     stats.smoothMovedArea += area;
                 }
                 faceSealed[static_cast<std::size_t>(fi)] = sealed ? 1 : 0;
+                if (buried && !sealed) {
+                    ++stats.buriedLandingFaces;
+                    stats.buriedLandingArea += area;
+                }
             }
             // A sealed face is refused at the LANDING only: it reverts to a wall
             // face at the interface it had already reached (its top loop). That
@@ -3263,8 +3298,8 @@ LayersResult applyLayers(const GeneratedMesh& cutMeshIn, const std::vector<int>&
             // from a volume delta three stages later.
             std::cerr << "warning: layers: seal guard dropped " << report.sealedStacks.size()
                       << " stacks (" << report.sealedArea << " m2 of wall) on pass " << passesRun
-                      << " -- the smoothed landing crossed into the solid there (facing walls closer than the"
-                      << " smoothing diameter); those faces stop one layer short of the wall, or keep the offset"
+                      << " -- the smoothed landing crossed the midline of a rib thinner than the smoothing"
+                      << " diameter there; those faces stop one layer short of the wall, or keep the offset"
                       << " cut where that position is buried too\n";
         }
         if (!report.thinStacks.empty() || report.orphanThinFaces > 0) {

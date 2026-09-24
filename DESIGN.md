@@ -308,8 +308,15 @@ features comparable to that radius can shrink or seal. Everything
 smoothing changes is measured: `smoothMovedArea`, and per-region
 `smoothSealedRegion*` records where the smoothed and exact fields
 disagree on *sign* — i.e. exactly where a passage sealed or a rib
-evaporated. A **seal guard** refuses to emit a wall face that landed
-inside the solid; the refused area is reported, never quietly written.
+evaporated. Where the smoothed zero rounds a sharp convex edge it lies
+inside the solid, and the wall face lands there: at most `0.25·h` deep,
+on the side it approached, reported as `buriedLanding*` (measured on a
+hydrofoil: 0.4 % of the wall, 0.2·h deep, all on leading and trailing
+edges). Refusing those faces left each stack a layer short. A **seal
+guard** still refuses a landing that is deeper, or that passed the
+midline of a rib (its nearest surface is no longer the one it
+approached, so the stack landing from the far side could cross it);
+the refused area is reported, never quietly written.
 
 The sweep that fixed the default:
 
@@ -372,7 +379,7 @@ every thread of a rank to one core and forfeits the speedup entirely.
 | No cell worse than checkMesh's own thresholds | checkMesh's per-face geometry tests transcribed from `primitiveMeshTools` and run *as a post-condition* — not paraphrased | Cut post-condition, merge refusal, and in-march prism validation |
 | No prism above the aspect-ratio ceiling | checkMesh's `cellClosedness` aspect metric vs its own default of 1000 | In-march validation; failing stack condemned, wall stays at the offset cut |
 | No prism face severely non-orthogonal | Angle between a prism face's normal and the line of centres vs checkMesh's own 70° — exact on the face to the cell above, one-sided on side faces whose neighbour is not decided yet | In-march validation. Measured on three windows: 148, 17 and 7 faces above 70° (worst 82.9°) → none, for 0.3 % fewer prisms |
-| No wall face inside the solid | Seal guard | Refused area reported per case |
+| No wall face deep inside the solid | Seal guard: a landing is emitted inside the solid only up to 0.25·h, on the side it approached | Buried area and depth, and refused area, reported per case |
 | Partition invariance | Exact integer keys; pure-function values; identical serial tail | `np_invariance`, byte-compare at np = 1/2/4 |
 
 The recurring pattern is worth naming: rather than *paraphrasing* what
