@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,11 @@ struct LayerStlSpec {
     // to a feature's size (in h_local units) can seal narrow passages;
     // keep r well under the smallest feature radius.
     double smoothRadius = 1.0;
+    // `localThickness true`: the total thickness at a point (the
+    // gradient-limited local field, see main.cpp's ThicknessField); each
+    // face's layers are sized by it at the face instead of by `thickness`.
+    // Empty (the default): one thickness for the whole STL.
+    std::function<double(const Vec3&)> localThickness;
 };
 
 // Why a wall face ended up without (all of) its layers -- the first refusal it

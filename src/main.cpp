@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -326,6 +327,11 @@ struct LayersConfig {
     // `smoothRadius` key. Absent keys keep LayerStlSpec's production
     // default (1.0); 0 disables smoothing for that STL.
     std::unordered_map<std::string, double> smoothRadiusByRawFile;
+    // `localThickness true` (default false): the total thickness PER UNIT
+    // CELL SIZE (finalLayerThickness * sum ratio^-i); the offset cut and the
+    // march take the thickness from ThicknessField instead of the constant
+    // above.
+    std::unordered_map<std::string, double> localPerHByRawFile;
     double absorbVolFrac = 0.3;
     // Test-only forced-drop scaffold, parsed from a top-level
     // `layersDebug { forceDropSphere (x y z r); }` block. Ignored when
@@ -363,13 +369,11 @@ double finalToTotalFactor(double expansionRatio, int nLayers) {
 // tied to a surface, and a box that merely overlaps a wall says nothing
 // about the cell size AT that wall -- only a surface rule does.
 //
-// LIMIT, stated because it is the reason this is only half the fix: the
-// answer is one level per STL, so it is exact only while one STL sits at
-// one level. bm_layers_wfp's `wfp_fw.stl` spans levels 2, 3 and 4 (its
-// own surface rule plus deeper boxes over the inlet slots), and takes
-// level 2 here. Per-FACE thickness, which tracks the cell the prism
-// actually grows from, is the successor to this and the thing that lets
-// a locally refined passage keep layers sized to fit it.
+// One level per STL: the level the whole STL's thickness is sized for,
+// exact only while the STL sits at one level (bm_layers_wfp's
+// `wfp_fw.stl` spans levels 2, 3 and 4 and takes level 2 here). With
+// `localThickness true` it is only the REFERENCE the thickness is written
+// against -- every face rescales it to its own cell.
 int refineLevelForStl(const std::vector<ninja::RefineRegion>& regions, const std::string& rawFile) {
     int lvl = 0;
     for (const ninja::RefineRegion& r : regions) {
@@ -512,6 +516,18 @@ LayersConfig buildLayersConfig(const ninja::DictEntry& root, const ninja::Geomet
         }
 
         lc.thicknessByRawFile[key] = finalFrac * hLocal * factor;
+        // `localThickness true`: the thickness follows the LOCAL cell, face by
+        // face (snappy's relativeSizes), instead of the one level above --
+        // for a wall whose parts are refined to different levels.
+        bool local = false;
+        if (entry.dict.find("localThickness") != entry.dict.end()) {
+            const std::string v = ninja::requireScalar(entry, "localThickness");
+            if (v != "true" && v != "false") {
+                throw std::runtime_error("Dict error: 'layers." + key + ".localThickness' must be true or false");
+            }
+            local = v == "true";
+        }
+        if (local) lc.localPerHByRawFile[key] = finalFrac * factor;
         lc.nLayersByRawFile[key] = nLayers;
         lc.ratioByRawFile[key] = expansionRatio;
 
@@ -614,6 +630,110 @@ std::vector<double> stlThicknessOf(const ninja::GeometryConfig& gc, const Layers
     return t;
 }
 
+// Per-STL thickness PER UNIT CELL SIZE for `localThickness` STLs, 0 for
+// the rest (aligned with `geom.stls`).
+std::vector<double> stlLocalPerHOf(const ninja::GeometryConfig& gc, const LayersConfig& layers) {
+    std::vector<double> v(gc.stls.size(), 0.0);
+    for (std::size_t s = 0; s < gc.stls.size(); ++s) {
+        auto it = layers.localPerHByRawFile.find(gc.stls[s].rawFile);
+        if (it != layers.localPerHByRawFile.end()) v[s] = it->second;
+    }
+    return v;
+}
+
+// --- `localThickness`: the gradient-limited local thickness field --------
+//
+// t(p) = min over levels L of ( perH * h_L + kThicknessSlope * dist(p, Z_L) ),
+// Z_L = the region the dict refines to level >= L, h_L = dx0 / 2^L.
+//
+// WHY NOT SIMPLY perH * h(cell at p). The offset cut removes everything
+// within t(p) of the wall, and a thickness that jumps 2x at every level
+// boundary makes that boundary a CLIFF: MEASURED on a hydrofoil, a 1 mm
+// level-7 front face had corners 1.1 to 3.1 mm off the wall, the march
+// sheared its prisms to 2-20% of the requested height, and every stack along
+// the 11->10->9 transitions behind the leading edge was dropped
+// (collapsed / meanHeight / bottomFolded + their one-ring neighbours). The
+// slope limit turns each cliff into a ramp no steeper than kThicknessSlope,
+// the same job snappy's thickness smoothing does.
+//
+// dist(p, Z_L) comes from the refinement RULES (box / sphere distance,
+// max(0, dist(p, S) - band) for a surface band), not from the realized
+// octree, so t is a pure function of position -- identical on every rank,
+// and one field for the cut (per vertex) and the march (per face).
+constexpr double kThicknessSlope = 0.25;
+
+class ThicknessField {
+public:
+    ThicknessField(const ninja::MeshConfig& cfg, const std::vector<ninja::RefineRegion>& regions,
+                   const ninja::GeometryConfig& geom)
+        : dx0_((cfg.max.x - cfg.min.x) / static_cast<double>(std::max(1, cfg.nx))), regions_(regions) {
+        std::vector<std::string> keys;
+        for (const ninja::RefineRegion& r : regions_) {
+            maxLevel_ = std::max(maxLevel_, r.level);
+            int k = -1;
+            if (r.type == "surface") {
+                auto it = std::find(keys.begin(), keys.end(), r.stlKey);
+                k = static_cast<int>(it - keys.begin());
+                if (it == keys.end()) keys.push_back(r.stlKey);
+            }
+            regionStl_.push_back(k);
+        }
+        tris_.resize(keys.size());   // sized once: the bins point into it
+        for (std::size_t k = 0; k < keys.size(); ++k) {
+            for (const std::vector<ninja::StlEntry>* list : {&geom.stls, &geom.sizing}) {
+                for (const ninja::StlEntry& se : *list) {
+                    if (se.rawFile == keys[k]) tris_[k] = ninja::readStl(se.stlPath);
+                }
+            }
+        }
+        for (const std::vector<ninja::Triangle>& t : tris_) bins_.push_back(ninja::buildTriangleAabbBins(t));
+    }
+    ThicknessField(const ThicknessField&) = delete;
+    ThicknessField& operator=(const ThicknessField&) = delete;
+
+    // Total thickness at p for an STL whose thickness is perH x the local cell.
+    double at(double perH, const ninja::Vec3& p) const {
+        std::vector<double> surfDist(tris_.size(), -1.0);
+        std::vector<double> distToLevel(static_cast<std::size_t>(maxLevel_) + 1,
+                                        std::numeric_limits<double>::max());
+        for (std::size_t r = 0; r < regions_.size(); ++r) {
+            const ninja::RefineRegion& reg = regions_[r];
+            double d = 0.0;
+            if (reg.type == "box") {
+                const double dx = std::max({reg.min.x - p.x, 0.0, p.x - reg.max.x});
+                const double dy = std::max({reg.min.y - p.y, 0.0, p.y - reg.max.y});
+                const double dz = std::max({reg.min.z - p.z, 0.0, p.z - reg.max.z});
+                d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            } else if (reg.type == "sphere") {
+                d = std::max(0.0, ninja::norm(p - reg.centre) - reg.radius);
+            } else {
+                double& sd = surfDist[static_cast<std::size_t>(regionStl_[r])];
+                if (sd < 0.0) sd = std::sqrt(ninja::closestPointOnSoup(bins_[static_cast<std::size_t>(regionStl_[r])], p).distSq);
+                d = std::max(0.0, sd - reg.distance);
+            }
+            double& dl = distToLevel[static_cast<std::size_t>(reg.level)];
+            dl = std::min(dl, d);
+        }
+        double t = perH * dx0_; // level 0 covers everything
+        double reach = std::numeric_limits<double>::max();
+        for (int L = maxLevel_; L >= 1; --L) {
+            reach = std::min(reach, distToLevel[static_cast<std::size_t>(L)]); // region refined to >= L
+            if (reach < std::numeric_limits<double>::max()) {
+                t = std::min(t, perH * std::ldexp(dx0_, -L) + kThicknessSlope * reach);
+            }
+        }
+        return t;
+    }
+
+private:
+    double dx0_;
+    int maxLevel_ = 0;
+    std::vector<ninja::RefineRegion> regions_;
+    std::vector<int> regionStl_; // surface rules: index into tris_/bins_, else -1
+    std::vector<std::vector<ninja::Triangle>> tris_;
+    std::vector<ninja::TriangleAabbBins> bins_;
+};
+
 std::vector<std::string> patchNamesOf(const ninja::GeometryConfig& gc); // forward decl, defined below
 
 // --- The MPI gather wire records ---------------------------------------
@@ -656,7 +776,8 @@ void runLayersStage(ninja::GeneratedMesh& mesh, std::vector<int>& cellLevel, std
                      ninja::CutStats& stats, std::vector<char>* pointFrozenOut = nullptr,
                      std::vector<char>* pointDroppedOut = nullptr,
                      std::vector<int>* cellStackIdOut = nullptr,
-                     std::vector<int>* cellLayerIndexOut = nullptr) {
+                     std::vector<int>* cellLayerIndexOut = nullptr,
+                     const ThicknessField* field = nullptr) {
     std::vector<std::vector<ninja::Triangle>> perStlTris = readPerStlTriangles(geom);
     std::vector<double> thickness = stlThicknessOf(geom, layers);
     std::vector<ninja::TriangleAabbBins> perStlBins;
@@ -678,6 +799,12 @@ void runLayersStage(ninja::GeneratedMesh& mesh, std::vector<int>& cellLevel, std
             if (rIt != layers.ratioByRawFile.end()) spec.expansionRatio = rIt->second;
             auto mfIt = layers.smoothRadiusByRawFile.find(raw);
             if (mfIt != layers.smoothRadiusByRawFile.end()) spec.smoothRadius = mfIt->second;
+            auto ltIt = layers.localPerHByRawFile.find(raw);
+            if (ltIt != layers.localPerHByRawFile.end()) {
+                if (field == nullptr) throw std::logic_error("localThickness without a thickness field");
+                const double perH = ltIt->second;
+                spec.localThickness = [field, perH](const ninja::Vec3& p) { return field->at(perH, p); };
+            }
             specs.push_back(spec);
         }
     }
@@ -1059,6 +1186,12 @@ PipelineResult runPipeline(const ninja::MeshConfig& cfg, const std::vector<ninja
                             const ninja::GeometryConfig& geom, const LayersConfig& layers,
                             const std::string& caseDir) {
     PipelineResult out;
+    // Built only when an STL asks for `localThickness`; read by the offset
+    // cut and the march alike.
+    std::unique_ptr<ThicknessField> thicknessField;
+    if (layers.present && !layers.localPerHByRawFile.empty()) {
+        thicknessField = std::make_unique<ThicknessField>(cfg, regions, geom);
+    }
     StageTimer timer;
     const bool root = ninja::parRank() == 0;
 
@@ -1117,8 +1250,29 @@ PipelineResult runPipeline(const ninja::MeshConfig& cfg, const std::vector<ninja
             for (std::size_t i = 0; i < bandPerPoint.size(); ++i) {
                 bandPerPoint[i] = std::ldexp(h0, -lr.pointFinestLevel[i]) / 4.0;
             }
+            // `localThickness` STLs: the local field at every vertex that can
+            // be within reach of the wall (farther than the level-0
+            // thickness plus the band, no radius can reach it).
+            std::vector<std::vector<double>> pointThickness(geom.stls.size());
+            const std::vector<double> perH = stlLocalPerHOf(geom, layers);
+            const double dx0 = (cfg.max.x - cfg.min.x) / static_cast<double>(std::max(1, cfg.nx));
+            for (std::size_t s = 0; s < geom.stls.size(); ++s) {
+                if (perH[s] <= 0.0) continue;
+                const ninja::TriangleAabbBins wallBins = ninja::buildTriangleAabbBins(perStlTris[s]);
+                std::vector<double>& pt = pointThickness[s];
+                pt.assign(lr.points.size(), perH[s] * dx0);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256)
+#endif
+                for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(lr.points.size()); ++i) {
+                    const std::size_t k = static_cast<std::size_t>(i);
+                    const double reachSq = std::pow(perH[s] * dx0 + bandPerPoint[k], 2);
+                    if (ninja::closestPointOnSoup(wallBins, lr.points[k]).distSq > reachSq) continue;
+                    pt[k] = thicknessField->at(perH[s], lr.points[k]);
+                }
+            }
             vertexSolid = ninja::classifyVerticesOffsetHalfGrid(lr.points, tris, perStlTris, geom.locationInMesh,
-                                                                thickness, bandPerPoint, onSurface);
+                                                                thickness, bandPerPoint, onSurface, pointThickness);
             intercepts = ninja::computeEdgeInterceptsOffsetHalfGrid(lr.points, tris, vertexSolid, onSurface,
                                                                     lr.edges, offsetStats);
         }
@@ -1391,7 +1545,7 @@ PipelineResult runPipeline(const ninja::MeshConfig& cfg, const std::vector<ninja
             ninja::writeCellIntField(keptFinal, dbg, "keptFinal");
         }
         runLayersStage(out.mesh, out.cellLevel, out.pointLevel, cfg, geom, layers, out.cutStats, &out.pointFrozen,
-                       &out.pointDropped, &out.cellStackId, &out.cellLayerIndex);
+                       &out.pointDropped, &out.cellStackId, &out.cellLayerIndex, thicknessField.get());
     }
     ninja::auditCellGeometry(out.mesh, "afterLayers");
     ninja::dropDisconnectedCells(out.mesh, out.cellLevel, out.pointLevel, geom.locationInMesh, out.cutStats,

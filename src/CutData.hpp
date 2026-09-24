@@ -156,13 +156,17 @@ std::vector<EdgeKey> collectEdges(const GeneratedMesh& mesh);
 // vertex is never a kept fluid corner -- which is what stops it being emitted
 // as a kept point AND an intercept at the same position). `onOut` is sized to
 // `points` and flags the ON state.
+// Per-vertex thickness: where pointThickness[s] is non-empty, STL s
+// offsets vertex i by pointThickness[s][i] (its local thickness field)
+// instead of the constant stlThickness[s].
 std::vector<bool> classifyVerticesOffsetHalfGrid(const std::vector<Vec3>& points,
                                                  const std::vector<Triangle>& tris,
                                                  const std::vector<std::vector<Triangle>>& perStlTris,
                                                  const Vec3& locationInMesh,
                                                  const std::vector<double>& stlThickness,
                                                  const std::vector<double>& bandPerPoint,
-                                                 std::vector<char>& onOut);
+                                                 std::vector<char>& onOut,
+                                                 const std::vector<std::vector<double>>& pointThickness = {});
 
 // Half-grid cut statistics, reported by --cut-stats.
 struct OffsetCutStats {

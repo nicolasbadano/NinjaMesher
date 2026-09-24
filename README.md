@@ -155,8 +155,14 @@ layers                   // optional prismatic inflation layers per surface
         // cell (snappy's `relativeSizes true` convention). Default 0.3.
         // The total is derived:
         //   total = finalLayerThickness * h * sum_{i<nLayers} ratio^-i
-        // where h is the cell size at this surface's refinement level.
+        // where h is the cell size at this surface's refinement level
+        // (or at each face, with localThickness).
         finalLayerThickness 0.4;
+        // localThickness true;  // default false: the thickness follows
+                                 // each face's OWN cell, so a wall
+                                 // crossing several levels gets layers
+                                 // sized to each (false: one thickness
+                                 // per STL, from its deepest surface rule)
         // smoothRadius 1.0;  // landing-surface smoothing radius in LOCAL
                               // GRID-CELL units (x the cell size at the
                               // wall); default 1.0, 0 disables. Keep well

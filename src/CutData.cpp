@@ -589,7 +589,8 @@ std::vector<bool> classifyVerticesOffsetHalfGrid(const std::vector<Vec3>& points
                                                  const Vec3& locationInMesh,
                                                  const std::vector<double>& stlThickness,
                                                  const std::vector<double>& bandPerPoint,
-                                                 std::vector<char>& onOut) {
+                                                 std::vector<char>& onOut,
+                                                 const std::vector<std::vector<double>>& pointThickness) {
     const TriangleAabbBins combinedBins = buildTriangleAabbBins(tris);
     const std::vector<TriangleAabbBins> perStlBins = buildPerStlBins(perStlTris, stlThickness);
     const bool locationSolid = isSolidAt(locationInMesh, tris, combinedBins);
@@ -618,8 +619,10 @@ std::vector<bool> classifyVerticesOffsetHalfGrid(const std::vector<Vec3>& points
         const double b = bandPerPoint[i];
         std::vector<double> shrunk(stlThickness.size()), grown(stlThickness.size());
         for (std::size_t s = 0; s < stlThickness.size(); ++s) {
-            shrunk[s] = stlThickness[s] > 0.0 ? std::max(0.0, stlThickness[s] - b) : 0.0;
-            grown[s] = stlThickness[s] > 0.0 ? stlThickness[s] + b : 0.0;
+            double t = stlThickness[s];
+            if (t > 0.0 && s < pointThickness.size() && !pointThickness[s].empty()) t = pointThickness[s][i];
+            shrunk[s] = t > 0.0 ? std::max(0.0, t - b) : 0.0;
+            grown[s] = t > 0.0 ? t + b : 0.0;
         }
         const bool nearSolid = offsetSolidAt(points[i], tris, combinedBins, locationSolid, perStlBins, shrunk);
         const bool farSolid = offsetSolidAt(points[i], tris, combinedBins, locationSolid, perStlBins, grown);

@@ -1300,6 +1300,33 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
         }
 
+        // `localThickness`: each face's thickness is the local field at the
+        // face -- faceScale = t(face) / t (1 otherwise); a point takes the
+        // thinnest of the faces around it. Only the ABSOLUTE thresholds
+        // scale: the step fractions below are ratios of layer
+        // thicknesses, and the front already sits at the local offset
+        // distance the cut gave it (from the same field).
+        std::vector<double> faceScale(static_cast<std::size_t>(nTop), 1.0);
+        std::vector<double> pointScale(nFront, 1.0);
+        if (spec.localThickness) {
+            std::fill(pointScale.begin(), pointScale.end(), std::numeric_limits<double>::max());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256)
+#endif
+            for (int fi = 0; fi < nTop; ++fi) {
+                std::vector<Vec3> loop;
+                for (int p : wallBucket.pointsOf(fi)) loop.push_back(out.points[static_cast<std::size_t>(p)]);
+                faceScale[static_cast<std::size_t>(fi)] = spec.localThickness(loopCentroid(loop)) / t;
+            }
+            for (int fi = 0; fi < nTop; ++fi) {
+                const double sc = faceScale[static_cast<std::size_t>(fi)];
+                for (int p : wallBucket.pointsOf(fi)) {
+                    double& ps = pointScale[static_cast<std::size_t>(frontIdx[p])];
+                    ps = std::min(ps, sc);
+                }
+            }
+        }
+
         std::vector<double> dVal(nFront, 0.0);
         std::vector<Vec3> hitPoint(nFront);
         std::vector<Vec3> dir(nFront);
@@ -1416,7 +1443,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 Vec3 acc{0, 0, 0};
                 double wsum = 0.0;
                 for (int j : adjacency[i]) {
-                    const double w = 1.0 / (1.0 + std::fabs(dVal[i] - dVal[static_cast<std::size_t>(j)]) / std::max(t, 1e-300));
+                    const double w = 1.0 / (1.0 + std::fabs(dVal[i] - dVal[static_cast<std::size_t>(j)]) / std::max(t * pointScale[i], 1e-300));
                     acc = acc + dir[static_cast<std::size_t>(j)] * w;
                     wsum += w;
                 }
@@ -1463,7 +1490,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 for (int j : adjacency[i]) {
                     if (static_cast<std::size_t>(j) <= i) continue;
                     const Vec3& q0 = out.points[static_cast<std::size_t>(frontPoints[static_cast<std::size_t>(j)])];
-                    if (norm(p0 - q0) < microLen) {
+                    if (norm(p0 - q0) < microLen * std::min(pointScale[i], pointScale[static_cast<std::size_t>(j)])) {
                         const int ra = findC(static_cast<int>(i));
                         const int rb = findC(j);
                         if (ra != rb) clusterOf[static_cast<std::size_t>(ra)] = rb;
@@ -1710,7 +1737,8 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 // perpendicular to the march) and halving its points crushes
                 // the healthy stacks that share them.
                 if (faceHeld(fi)) continue;
-                const bool valid = prismValid(topLoop, botLoop, /*minHeight=*/0.0, minVolEps, nullptr, 0.0, 0.0,
+                const double fs = faceScale[static_cast<std::size_t>(fi)];
+                const bool valid = prismValid(topLoop, botLoop, /*minHeight=*/0.0, minVolEps * fs * fs * fs, nullptr, 0.0, 0.0,
                                               nullptr, /*exactReflex=*/true);
                 if (!valid) {
                     anyInvalid = true;
@@ -1789,7 +1817,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             if (lastStep && scaleFactor[i] >= kFreezeScaleThreshold) {
                 ClosestHit hit2 = closestPointOnSoup(bins, preLandAll[i]);
                 const double remaining = std::sqrt(hit2.distSq);
-                nearlyThere[i] = remaining < kLandFrac * tStep ? 1 : 0;
+                nearlyThere[i] = remaining < kLandFrac * tStep * pointScale[i] ? 1 : 0;
                 exactSnap[i] = hit2.point;
             }
         }
@@ -1978,7 +2006,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                         const std::size_t k = active[a];
                         ++evalCount[k];
                         const double fc = qphi[a];
-                        if (std::fabs(fc) < landTol) {
+                        if (std::fabs(fc) < landTol * pointScale[candIdx[k]]) {
                             rfConverged[k] = 1;
                             continue;
                         }
@@ -2073,8 +2101,8 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 const Vec3& topPos = out.points[static_cast<std::size_t>(origin)];
                 const double achieved = norm(topPos - landedPts[i]);
                 stats.stackThickness.push_back(achieved);
-                if (achieved < 0.5 * t) ++stats.stackThicknessBelowHalfT;
-                if (achieved < 0.25 * t) ++stats.stackThicknessBelowQuarterT;
+                if (achieved < 0.5 * t * pointScale[i]) ++stats.stackThicknessBelowHalfT;
+                if (achieved < 0.25 * t * pointScale[i]) ++stats.stackThicknessBelowQuarterT;
             }
 
             // Exact signed distance at the landed position: one more
@@ -2330,8 +2358,10 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
             int fcode = 0;
             double meanHeight = -1.0;
-            bool valid = prismValid(topLoop, botLoop, minHeight, minVolEps, &fcode, kMaxPrismAspect,
-                                    minAchievedHeightFrac() * tStep, &meanHeight);
+            const double fs = faceScale[static_cast<std::size_t>(fi)];
+            const double tStepF = tStep * fs; // this face's own layer step
+            bool valid = prismValid(topLoop, botLoop, minHeight * fs, minVolEps * fs * fs * fs, &fcode, kMaxPrismAspect,
+                                    minAchievedHeightFrac() * tStepF, &meanHeight);
             // A held face (see faceHeld) is never extruded -- it stays a wall
             // face for the rest of the march -- and (below) never dilates.
             // MEASURED (bm_layers_wfp): re-extruding the terrace seams always
@@ -2344,8 +2374,8 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 meanHeight = -1.0;
             }
             if (!valid) dropReason[static_cast<std::size_t>(fi)] = fcode == 99 ? kDropHeldSeam : fcode;
-            if (meanHeight >= 0.0 && tStep > 0.0) {
-                const double frac = meanHeight / tStep;
+            if (meanHeight >= 0.0 && tStepF > 0.0) {
+                const double frac = meanHeight / tStepF;
                 if (layerHeightHist() && valid) {
                     // bin index 0..19 over [0,1), 20 for >= 1
                     const int b = frac >= 1.0 ? 20 : static_cast<int>(frac * 20.0);
@@ -2449,7 +2479,9 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             if (valid) {
                 const int coreCell = wallBucket.owner[static_cast<std::size_t>(fi)];
                 const Vec3* ownerCentroid = lqOwnerCentroidOf(coreCell);
-                const LayerCellQuality q = evaluateLayerCellQuality(topLoop, botLoop, tStep, ownerCentroid);
+                const LayerCellQuality q = evaluateLayerCellQuality(topLoop, botLoop,
+                                                                    tStep * faceScale[static_cast<std::size_t>(fi)],
+                                                                    ownerCentroid);
                 faceQuality[static_cast<std::size_t>(fi)] = q;
                 if (q.nBadPyramidFaces > 0 || q.nBadTetFaces > 0 || q.nHighSkewFaces > 0 || q.nHighNonOrthFaces > 0) {
                     qualityBad[static_cast<std::size_t>(fi)] = 1;
