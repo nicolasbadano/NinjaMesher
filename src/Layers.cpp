@@ -734,7 +734,8 @@ Vec3 polyhedronCentroidFromOutwardLoops(const std::vector<std::vector<Vec3>>& lo
 // a warped wall pentagon to flip that one face's sign), which the
 // prism's own well-shaped local centroid alone never reproduces.
 LayerCellQuality evaluateLayerCellQuality(const std::vector<Vec3>& top, const std::vector<Vec3>& bot,
-                                           double /*lengthScale*/, const Vec3* ownerCentroid) {
+                                           double /*lengthScale*/, const Vec3* ownerCentroid,
+                                           const std::vector<const Vec3*>* sideNeighbourCentroids = nullptr) {
     LayerCellQuality r;
     const std::size_t n = top.size();
     if (n != bot.size() || n < 3) return r;
@@ -798,23 +799,30 @@ LayerCellQuality evaluateLayerCellQuality(const std::vector<Vec3>& top, const st
     }
 
     // Skewness. Top face: the internal form when the owner (core) is
-    // known. Bottom and side quads: the BOUNDARY form from this prism's
-    // own centroid -- exact for the wall/seam faces they may become,
-    // and a documented proxy for a side quad that ends up internal
-    // (its neighbour prism is not decided yet at validation time).
+    // known. Bottom face: the BOUNDARY form from this prism's own centroid.
+    // Side quads: see sideNeighbour below.
     if (ownerCentroid) {
         if (faceSkewnessOf(top, *ownerCentroid, &centroid) > kSkewMax) ++r.nHighSkewFaces;
     } else if (faceSkewnessOf(topRev, centroid, nullptr) > kSkewMax) {
         ++r.nHighSkewFaces;
     }
     if (faceSkewnessOf(bot, centroid, nullptr) > kSkewMax) ++r.nHighSkewFaces;
-    for (const auto& quad : sideQuads) {
-        if (faceSkewnessOf(quad, centroid, nullptr) > kSkewMax) ++r.nHighSkewFaces;
+    // A side quad whose neighbouring front face also carries a prism this
+    // step is an INTERNAL face between the two, and checkMesh scores it
+    // against both centres; only a rim quad keeps the one-sided form (a
+    // neighbour reverted later is re-scored one-sided by the caller).
+    // MEASURED: scoring every side quad one-sided dropped healthy stacks on
+    // sheared fronts -- bm_layers_wfp 335 -> 296, hydrofoil window 799 -> 550.
+    auto sideNeighbour = [&](std::size_t i) -> const Vec3* {
+        return sideNeighbourCentroids && i < sideNeighbourCentroids->size() ? (*sideNeighbourCentroids)[i] : nullptr;
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        if (faceSkewnessOf(sideQuads[i], centroid, sideNeighbour(i)) > kSkewMax) ++r.nHighSkewFaces;
     }
-    // Non-orthogonality, same split: exact for the top face, proxy for the sides.
+    // Non-orthogonality, same split (checkMesh scores internal faces only).
     if (ownerCentroid && faceNonOrthDegOf(top, *ownerCentroid, &centroid) > kNonOrthMaxDeg) ++r.nHighNonOrthFaces;
-    for (const auto& quad : sideQuads) {
-        if (faceNonOrthDegOf(quad, centroid, nullptr) > kNonOrthMaxDeg) ++r.nHighNonOrthFaces;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (faceNonOrthDegOf(sideQuads[i], centroid, sideNeighbour(i)) > kNonOrthMaxDeg) ++r.nHighNonOrthFaces;
     }
     return r;
 }
@@ -2357,6 +2365,48 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         // --- Prism validation using FINAL positions + forced
         // drops (layersDebug{forceDropSphere}).
         std::vector<bool> faceValid(static_cast<std::size_t>(nTop), true);
+        // Candidate prism centres (every face that passes prismValid), so a
+        // side quad can be scored against the prism it will share it with.
+        std::vector<char> candOk(static_cast<std::size_t>(nTop), 0);
+        std::vector<Vec3> candCentroid(static_cast<std::size_t>(nTop));
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256)
+#endif
+        for (int fi = 0; fi < nTop; ++fi) {
+            if (faceHeld(fi)) continue;
+            const IntSpan fp = wallBucket.pointsOf(fi);
+            std::vector<Vec3> topLoop, botLoop;
+            for (int p : fp) {
+                topLoop.push_back(out.points[static_cast<std::size_t>(p)]);
+                botLoop.push_back(out.points[static_cast<std::size_t>(bottomPointIdx[static_cast<std::size_t>(frontIdx.at(p))])]);
+            }
+            const double fs = faceScale[static_cast<std::size_t>(fi)];
+            if (!prismValid(topLoop, botLoop, minHeight * fs, minVolEps * fs * fs * fs, nullptr, kMaxPrismAspect,
+                            minAchievedHeightFrac() * tStep * fs, nullptr)) {
+                continue;
+            }
+            const std::size_t n = topLoop.size();
+            std::vector<std::vector<Vec3>> loops;
+            loops.push_back(std::vector<Vec3>(topLoop.rbegin(), topLoop.rend()));
+            loops.push_back(botLoop);
+            for (std::size_t i = 0; i < n; ++i) {
+                loops.push_back({topLoop[i], topLoop[(i + 1) % n], botLoop[(i + 1) % n], botLoop[i]});
+            }
+            candCentroid[static_cast<std::size_t>(fi)] = polyhedronCentroidFromOutwardLoops(loops);
+            candOk[static_cast<std::size_t>(fi)] = 1;
+        }
+        auto sideNeighboursOf = [&](int fi) {
+            const IntSpan fp = wallBucket.pointsOf(fi);
+            const int n = fp.size();
+            std::vector<const Vec3*> nb(static_cast<std::size_t>(n), nullptr);
+            for (int i = 0; i < n; ++i) {
+                auto it = edgeToFaces.find(makeEdgeKey(fp[i], fp[(i + 1) % n]));
+                if (it == edgeToFaces.end() || it->second.size() != 2) continue;
+                const int other = it->second[0] == fi ? it->second[1] : it->second[0];
+                if (candOk[static_cast<std::size_t>(other)]) nb[static_cast<std::size_t>(i)] = &candCentroid[static_cast<std::size_t>(other)];
+            }
+            return nb;
+        };
         // In-march quality guard (the POST-CONDITION): every prism is
         // evaluated with the gate's own checkMesh-mimicking predicate
         // (face-pyramid orientation + tet decomposition, owner side of
@@ -2503,9 +2553,10 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             if (valid) {
                 const int coreCell = wallBucket.owner[static_cast<std::size_t>(fi)];
                 const Vec3* ownerCentroid = lqOwnerCentroidOf(coreCell);
+                const std::vector<const Vec3*> sideNb = sideNeighboursOf(fi);
                 const LayerCellQuality q = evaluateLayerCellQuality(topLoop, botLoop,
                                                                     tStep * faceScale[static_cast<std::size_t>(fi)],
-                                                                    ownerCentroid);
+                                                                    ownerCentroid, &sideNb);
                 faceQuality[static_cast<std::size_t>(fi)] = q;
                 if (q.nBadPyramidFaces > 0 || q.nBadTetFaces > 0 || q.nHighSkewFaces > 0 || q.nHighNonOrthFaces > 0) {
                     qualityBad[static_cast<std::size_t>(fi)] = 1;
@@ -2550,6 +2601,41 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         }
         for (int fi = 0; fi < nTop; ++fi) {
             if (qualityBad[static_cast<std::size_t>(fi)]) reverted[static_cast<std::size_t>(fi)] = true;
+        }
+        // A side quad scored against its neighbour's prism becomes a SEAM
+        // (boundary) face when that neighbour is reverted after all, and a
+        // boundary face is held to its own prism's centre alone. Re-score
+        // those until no new face reverts (MEASURED, bm_layers_wfp: one
+        // seam quad at skewness 4.7 shipped without this).
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (int fi = 0; fi < nTop; ++fi) {
+                if (reverted[static_cast<std::size_t>(fi)]) continue;
+                const IntSpan fp = wallBucket.pointsOf(fi);
+                const int n = fp.size();
+                const Vec3& cc = faceQuality[static_cast<std::size_t>(fi)].centroid;
+                for (int i = 0; i < n; ++i) {
+                    auto it = edgeToFaces.find(makeEdgeKey(fp[i], fp[(i + 1) % n]));
+                    if (it == edgeToFaces.end() || it->second.size() != 2) continue;
+                    const int other = it->second[0] == fi ? it->second[1] : it->second[0];
+                    if (!candOk[static_cast<std::size_t>(other)] || !reverted[static_cast<std::size_t>(other)]) continue;
+                    const int a = fp[i];
+                    const int b = fp[(i + 1) % n];
+                    const std::vector<Vec3> quad{
+                        out.points[static_cast<std::size_t>(a)], out.points[static_cast<std::size_t>(b)],
+                        out.points[static_cast<std::size_t>(bottomPointIdx[static_cast<std::size_t>(frontIdx.at(b))])],
+                        out.points[static_cast<std::size_t>(bottomPointIdx[static_cast<std::size_t>(frontIdx.at(a))])]};
+                    const bool skewBad = faceSkewnessOf(quad, cc, nullptr) > kSkewMax;
+                    if (skewBad || faceNonOrthDegOf(quad, cc, nullptr) > kNonOrthMaxDeg) {
+                        reverted[static_cast<std::size_t>(fi)] = true;
+                        qualityBad[static_cast<std::size_t>(fi)] = 1;
+                        dropReason[static_cast<std::size_t>(fi)] = skewBad ? kDropSkew : kDropNonOrth;
+                        ++stats.qualityDroppedFaces;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
         }
         for (int fi = 0; fi < nTop; ++fi) {
             if (!reverted[static_cast<std::size_t>(fi)]) continue;
@@ -2825,11 +2911,11 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                         if (want == have) {
                             internalOut.neighbour[static_cast<std::size_t>(cand)] =
                                 topFaceToPrism[static_cast<std::size_t>(fi)];
-                            // TWO-SIDED tet test, now that both prisms exist.
-                            // The per-cell evaluation above can only hold a side
-                            // quad to its OWN prism's centre (its neighbour is
-                            // not decided at validation time); checkMesh scores
-                            // an INTERNAL face against BOTH centres
+                            // TWO-SIDED test, now that both prisms exist. The
+                            // per-cell evaluation above scores a side quad
+                            // against the neighbour's CANDIDATE prism, and its
+                            // tet test against its own centre only; checkMesh
+                            // scores an INTERNAL face against BOTH final centres
                             // (findSharedBasePoint). MEASURED (win_wfp_apron with
                             // the per-vertex half-grid band): 5 internal side
                             // quads between adjacent triangular prisms shipped
@@ -2840,7 +2926,9 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                             for (int p : cp) quadLoop.push_back(out.points[static_cast<std::size_t>(p)]);
                             const Vec3& ownC = faceQuality[static_cast<std::size_t>(otherFi)].centroid;
                             const Vec3& nbrC = faceQuality[static_cast<std::size_t>(fi)].centroid;
-                            if (!faceHasUsableBasePoint(ownC, &nbrC, quadLoop, kMinTetQuality)) {
+                            if (!faceHasUsableBasePoint(ownC, &nbrC, quadLoop, kMinTetQuality) ||
+                                faceNonOrthDegOf(quadLoop, ownC, &nbrC) > kNonOrthMaxDeg ||
+                                faceSkewnessOf(quadLoop, ownC, &nbrC) > kSkewMax) {
                                 for (int f2 : {otherFi, fi}) {
                                     const int origin2 = faceGateStack[static_cast<std::size_t>(f2)];
                                     if (origin2 < 0) {
