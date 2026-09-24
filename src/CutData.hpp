@@ -177,8 +177,13 @@ struct OffsetCutStats {
     int onVertexIntercepts = 0;
 };
 
+// Each intercept is owned by the STL whose offset surface it lies on
+// (argmin over s of distance - thickness), with the thickness read as in
+// classifyVerticesOffsetHalfGrid.
 std::unordered_map<EdgeKey, Intercept, EdgeKeyHash> computeEdgeInterceptsOffsetHalfGrid(
-    const std::vector<Vec3>& points, const std::vector<Triangle>& tris, const std::vector<bool>& vertexSolid,
-    const std::vector<char>& onSurface, const std::vector<EdgeKey>& edges, OffsetCutStats& stats);
+    const std::vector<Vec3>& points, const std::vector<std::vector<Triangle>>& perStlTris,
+    const std::vector<double>& stlThickness, const std::vector<std::vector<double>>& pointThickness,
+    const std::vector<bool>& vertexSolid, const std::vector<char>& onSurface, const std::vector<EdgeKey>& edges,
+    OffsetCutStats& stats);
 
 } // namespace ninja

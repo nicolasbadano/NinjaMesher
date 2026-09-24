@@ -1278,8 +1278,8 @@ PipelineResult runPipeline(const ninja::MeshConfig& cfg, const std::vector<ninja
             }
             vertexSolid = ninja::classifyVerticesOffsetHalfGrid(lr.points, tris, perStlTris, geom.locationInMesh,
                                                                 thickness, bandPerPoint, onSurface, pointThickness);
-            intercepts = ninja::computeEdgeInterceptsOffsetHalfGrid(lr.points, tris, vertexSolid, onSurface,
-                                                                    lr.edges, offsetStats);
+            intercepts = ninja::computeEdgeInterceptsOffsetHalfGrid(lr.points, perStlTris, thickness, pointThickness,
+                                                                    vertexSolid, onSurface, lr.edges, offsetStats);
         }
         pointRecs.reserve(lr.points.size());
         for (std::size_t i = 0; i < lr.points.size(); ++i) {

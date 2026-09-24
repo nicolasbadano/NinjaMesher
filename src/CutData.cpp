@@ -654,10 +654,13 @@ std::vector<bool> classifyVerticesOffsetHalfGrid(const std::vector<Vec3>& points
 //   solid endpoint is IN -> the crossing is interior to the edge; snap to the
 //                           MIDPOINT (the nearest half-grid node).
 std::unordered_map<EdgeKey, Intercept, EdgeKeyHash> computeEdgeInterceptsOffsetHalfGrid(
-    const std::vector<Vec3>& points, const std::vector<Triangle>& tris, const std::vector<bool>& vertexSolid,
-    const std::vector<char>& onSurface, const std::vector<EdgeKey>& edges, OffsetCutStats& stats) {
+    const std::vector<Vec3>& points, const std::vector<std::vector<Triangle>>& perStlTris,
+    const std::vector<double>& stlThickness, const std::vector<std::vector<double>>& pointThickness,
+    const std::vector<bool>& vertexSolid, const std::vector<char>& onSurface, const std::vector<EdgeKey>& edges,
+    OffsetCutStats& stats) {
     std::unordered_map<EdgeKey, Intercept, EdgeKeyHash> result;
-    const TriangleAabbBins combinedBins = buildTriangleAabbBins(tris);
+    std::vector<TriangleAabbBins> perStlBins(perStlTris.size());
+    for (std::size_t s = 0; s < perStlTris.size(); ++s) perStlBins[s] = buildTriangleAabbBins(perStlTris[s]);
     stats.multiRootEdges = 0;
     for (const EdgeKey& e : edges) {
         const std::size_t a = static_cast<std::size_t>(e.first);
@@ -669,10 +672,24 @@ std::unordered_map<EdgeKey, Intercept, EdgeKeyHash> computeEdgeInterceptsOffsetH
         // the nearest half-grid node.
         const std::size_t fluidEnd = vertexSolid[a] ? b : a;
         const Vec3 pt = onSurface[fluidEnd] ? points[fluidEnd] : (points[a] + points[b]) * 0.5;
+        // The owner is the STL whose OFFSET surface passes here -- the one
+        // minimising d_s - t_s -- not the nearest STL: in a gap between a
+        // thin-layered and a thick-layered wall the point sits on the thick
+        // wall's offset while the thin wall can be nearer, and the march
+        // then extrudes the face along the wrong wall's field (MEASURED,
+        // bm_layers_gate: 2124 of 2136 bottomFolded drops, a pier's offset
+        // face owned by the radial gate beside it). Ties -> lowest ordinal.
         int solidId = 0;
-        if (!tris.empty()) {
-            const ClosestHit hit = closestPointOnSoup(combinedBins, pt);
-            if (hit.triangle >= 0) solidId = tris[static_cast<std::size_t>(hit.triangle)].solidId;
+        double bestGap = std::numeric_limits<double>::max();
+        for (std::size_t s = 0; s < perStlBins.size(); ++s) {
+            if (perStlTris[s].empty()) continue;
+            double t = s < stlThickness.size() ? stlThickness[s] : 0.0;
+            if (t > 0.0 && s < pointThickness.size() && !pointThickness[s].empty()) t = pointThickness[s][fluidEnd];
+            const double gap = std::sqrt(closestPointOnSoup(perStlBins[s], pt).distSq) - t;
+            if (gap < bestGap) {
+                bestGap = gap;
+                solidId = static_cast<int>(s);
+            }
         }
         result[e] = Intercept{pt, solidId};
         ++stats.quantizedIntercepts;
