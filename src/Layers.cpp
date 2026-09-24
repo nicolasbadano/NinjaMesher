@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -955,6 +956,7 @@ struct TerracedFaceSite {
     int coreLevel;    // refinement level of the adjacent core (un-extruded) cell
     int achievedLayers;
     int specLayers;
+    int reason;       // LayerDropReason that terraced it
 };
 
 struct LayerGateReport {
@@ -1006,6 +1008,35 @@ std::string domainPatchNameOf(int plane, const MeshConfig& cfg) {
 // passes (never extruded here); `report` collects this pass's own
 // verdicts. An empty `gateRemoved` + an empty resulting `report` is the
 // pre-gate behaviour, bit for bit.
+// Cumulative wall-clock per named section of one gate pass, printed at
+// the end of the pass under NINJA_STAGE_TIMES (never otherwise).
+struct PassClock {
+    bool on = std::getenv("NINJA_STAGE_TIMES") != nullptr;
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    std::vector<std::pair<std::string, double>> acc;
+    void lap(const char* name) {
+        if (!on) return;
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(now - last).count();
+        last = now;
+        for (auto& [n, t] : acc) {
+            if (n == name) {
+                t += dt;
+                return;
+            }
+        }
+        acc.emplace_back(name, dt);
+    }
+    void print() const {
+        if (!on) return;
+        double total = 0.0;
+        for (const auto& [n, t] : acc) total += t;
+        std::cout << "layers pass time " << total << " s:";
+        for (const auto& [n, t] : acc) std::cout << " [" << n << " " << t << "]";
+        std::cout << std::endl;
+    }
+};
+
 LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<int>& cellLevelIn,
                           const std::vector<int>& pointLevelIn, const MeshConfig& cfg,
                           const std::vector<LayerStlSpec>& specs,
@@ -1014,6 +1045,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                           const std::vector<ForceDropSphere>& forceDropSpheres,
                           const std::set<std::pair<int, int>>& gateRemoved,
                           LayerGateReport& report, const Vec3& locationInMesh) {
+    PassClock clk; // NINJA_STAGE_TIMES: cumulative wall-clock per march section
     LayersResult result;
     GeneratedMesh out = cutMeshIn; // full copy; mutated below (points/cells appended, some
                                    // faces rewritten in place, patches rebuilt at the end)
@@ -1122,6 +1154,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         return it != lqPrismCentroid.end() ? &it->second : nullptr;
     };
 
+    clk.lap("pass setup");
     for (const LayerStlSpec& spec : specs) {
         const int pOrd = patchNameToOrdinal.at(spec.wallPatchName);
         FaceStore& wallBucket = boundaryByPatch[static_cast<std::size_t>(pOrd)];
@@ -1220,6 +1253,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             stats.perStepPrismCells.resize(static_cast<std::size_t>(nSteps), 0);
         }
 
+        clk.lap("spec setup");
         for (int step = 0; step < nSteps; ++step) {
         const int layerJ = nSteps - 1 - step; // marching outermost layer first
         const double tStep = layerThickness[static_cast<std::size_t>(layerJ)];
@@ -1241,6 +1275,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         std::vector<double> lqWorstPerCell;
         std::vector<std::pair<int, double>> lqNewFlaggedThisStep; // (origin id, non-planarity)
 
+        clk.lap("step header");
         // --- Front construction -------------------------------------
         std::set<int> frontSet;
         for (int fi = 0; fi < nTop; ++fi) {
@@ -1371,6 +1406,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
         }
 
+        clk.lap("front + field");
         // --- Laplacian smoothing, weights favouring similar remaining d
         // (documented formula: w(p,q) = 1 / (1 + |d(p)-d(q)| / t)).
         for (int pass = 0; pass < kLaplacianPasses; ++pass) {
@@ -1393,6 +1429,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             dir = std::move(next);
         }
 
+        clk.lap("laplacian");
         // --- Domain-boundary in-plane projection.
         for (std::size_t i = 0; i < nFront; ++i) {
             if (domainPlanes[i].empty()) continue;
@@ -1404,6 +1441,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             dir[i] = normalizeOrZero(d); // zero at a fully-constrained corner: point cannot move in-plane
         }
 
+        clk.lap("domain projection");
         // --- Micro-edge rigid clusters (see kMicroEdgeFrac): union-find
         // over front edges shorter than kMicroEdgeFrac * tStep, then
         // unify the march direction across each cluster (normalized
@@ -1451,6 +1489,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
         }
 
+        clk.lap("micro-edge clusters");
         // --- Angle clamp -> per-point UNCLAMPED-for-stretch step length.
         // frontNormal is the area-weighted average of the STORED
         // top-face orientation, which is outward-FROM-CORE -- and since
@@ -1528,6 +1567,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         for (std::size_t i = 0; i < nFront; ++i) {
             stepLen[i] = stepLen0[i] * frac[i];
         }
+        clk.lap("angle clamp");
         // --- Surface guard: a step may not carry a front point THROUGH a
         // surface and leave it in the fluid on the far side. A sound landing can
         // pass the true surface -- the smoothed field rounds convex edges, and
@@ -1595,6 +1635,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         for (std::size_t i = 0; i < nFront; ++i) {
             tentative[i] = out.points[static_cast<std::size_t>(frontPoints[i])] + dir[i] * stepLen[i];
         }
+        clk.lap("surface guard");
         // --- Non-inversion clamp: bisect ALL points of any invalid
         // prism toward their original (top) position, iterate, freeze
         // if still invalid after the bound.
@@ -1708,6 +1749,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 if (frozenOrigins.insert(originOfPoint(frontPoints[i])).second) ++stats.frozenPoints;
             }
         }
+        clk.lap("non-inversion clamp");
         // --- Landing (LAST layer step only): re-query at the (possibly
         // frozen/clamped) tentative position. Intermediate steps must
         // NOT snap/land -- their fronts are meant to sit at the layer
@@ -2002,6 +2044,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
         }
 
+        clk.lap("landing");
         // --- "What smoothing destroys must be loud". Only meaningful (and only paid for) on the
         // WALL layer's landed positions, and only when smoothingOn -- this
         // measures the landing above, and (since the seal guard below)
@@ -2243,6 +2286,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
         }
 
+        clk.lap("smoothing disclosure");
         // --- New bottom points (deterministic creation order: ascending
         // front-point original index, independent of face iteration order).
         std::vector<int> bottomPointIdx(nFront, -1);
@@ -2255,6 +2299,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             pointOrigin[bottomPointIdx[i]] = originOfPoint(frontPoints[i]);
         }
 
+        clk.lap("new bottom points");
         // --- Prism validation using FINAL positions + forced
         // drops (layersDebug{forceDropSphere}).
         std::vector<bool> faceValid(static_cast<std::size_t>(nTop), true);
@@ -2493,12 +2538,13 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                     const Vec3 fc = areaWeightedCentroid(loop0);
                     const int coreCellHere = wallBucket.owner[static_cast<std::size_t>(fi)];
                     report.terracedFaces.push_back({pOrd, o, fc.x, fc.y, fc.z, levelOfCell(coreCellHere), step,
-                                                     nSteps});
+                                                     nSteps, reason});
                 }
             }
         }
 
 
+        clk.lap("validation + drops");
         // --- Emission: build the new wall bucket (dropped faces copied
         // unchanged; kept faces become internal + get a bottom face),
         // side faces (internal between two kept prisms, else boundary),
@@ -2820,6 +2866,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         wallBucket = std::move(newWallBucket);
         faceOrigin = std::move(newFaceOrigin);
         faceGateStack = std::move(newFaceGateStack);
+        clk.lap("emission");
         } // step loop (layer-by-layer march)
 
         // Propagate this STL's frozen/dropped origin sets onto the
@@ -2868,6 +2915,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         std::cout << "--- end layer-quality stats ---\n";
     }
 
+    clk.lap("spec tail");
     // --- Reassemble: enforce owner < neighbour on every internal face
     // (swap + reverse otherwise), then sort by (owner, neighbour).
     for (int fi = 0; fi < internalOut.size(); ++fi) {
@@ -2911,6 +2959,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         lix.insert(lix.end(), newCellLayerIndex.begin(), newCellLayerIndex.end());
     }
 
+    clk.lap("reassemble");
     // --- Final point compaction: some bottom points are created for
     // EVERY front point (needed to evaluate prism validity for dropped
     // candidates too) but a point whose only incident faces all got
@@ -3002,6 +3051,9 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
 
     stats.residualMean = residualAreaSum > 0.0 ? residualWeightedSum / residualAreaSum : 0.0;
     stats.residualMax = residualMax;
+
+    clk.lap("compaction");
+    clk.print();
 
     result.mesh = std::move(finalMesh);
     result.cellLevel = std::move(cellLevel);
@@ -3278,10 +3330,10 @@ LayersResult applyLayers(const GeneratedMesh& cutMeshIn, const std::vector<int>&
         const std::string terracedPath = std::string(path) + ".terraced";
         std::FILE* ft = std::fopen(terracedPath.c_str(), "w");
         if (ft) {
-            std::fprintf(ft, "patchOrdinal,origin,x,y,z,coreLevel,achievedLayers,specLayers\n");
+            std::fprintf(ft, "patchOrdinal,origin,x,y,z,coreLevel,achievedLayers,specLayers,reason\n");
             for (const TerracedFaceSite& s : report.terracedFaces) {
-                std::fprintf(ft, "%d,%d,%.9f,%.9f,%.9f,%d,%d,%d\n", s.patchOrdinal, s.origin, s.x, s.y, s.z,
-                             s.coreLevel, s.achievedLayers, s.specLayers);
+                std::fprintf(ft, "%d,%d,%.9f,%.9f,%.9f,%d,%d,%d,%s\n", s.patchOrdinal, s.origin, s.x, s.y, s.z,
+                             s.coreLevel, s.achievedLayers, s.specLayers, layerDropReasonName(s.reason));
             }
             std::fclose(ft);
         } else {
