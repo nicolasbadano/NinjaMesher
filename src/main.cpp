@@ -34,7 +34,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.1.0";
+constexpr const char* kVersion = "0.2.0";
 
 // Opt-in wall-clock stage timing, stderr-only, enabled by
 // NINJA_STAGE_TIMES=1 (never printed in normal runs, so no gate/log
