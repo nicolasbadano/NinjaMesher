@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -136,6 +139,55 @@ std::array<Key, 4> subQuadCorners(int dir, int I0, int J0, int K0, int step, int
     return corners;
 }
 
+// The corner keys of a quad set, one sorted copy per axis ordered so
+// the keys on any grid line along that axis are contiguous and
+// ascending along it: the conformance splice then reads the corners
+// strictly inside a quad edge as one range, instead of probing every
+// fine lattice point of the edge (R of them, 2048 at maxLevel 11).
+class CornerLines {
+public:
+    explicit CornerLines(std::vector<Key> keys) {
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        for (int a = 0; a < 3; ++a) {
+            byAxis_[a] = keys;
+            std::sort(byAxis_[a].begin(), byAxis_[a].end(),
+                      [a](const Key& u, const Key& v) { return lineOrder(a, u) < lineOrder(a, v); });
+        }
+    }
+
+    // Appends the corners strictly between the ends of the axis-aligned
+    // segment a->b, in order from a to b.
+    void appendInterior(const Key& a, const Key& b, std::vector<Key>& out) const {
+        const int ax = a.i != b.i ? 0 : (a.j != b.j ? 1 : (a.k != b.k ? 2 : -1));
+        if (ax < 0) return;
+        const std::array<int, 3> la = lineOrder(ax, a), lb = lineOrder(ax, b);
+        std::array<int, 3> lo = la, hi = la;
+        lo[2] = std::min(la[2], lb[2]) + 1;
+        hi[2] = std::max(la[2], lb[2]) - 1;
+        if (lo[2] > hi[2]) return;
+        const std::vector<Key>& v = byAxis_[ax];
+        auto cmpLo = [ax](const Key& k, const std::array<int, 3>& t) { return lineOrder(ax, k) < t; };
+        auto cmpHi = [ax](const std::array<int, 3>& t, const Key& k) { return t < lineOrder(ax, k); };
+        const auto first = std::lower_bound(v.begin(), v.end(), lo, cmpLo);
+        const auto last = std::upper_bound(first, v.end(), hi, cmpHi);
+        if (la[2] < lb[2]) {
+            out.insert(out.end(), first, last);
+        } else {
+            out.insert(out.end(), std::make_reverse_iterator(last), std::make_reverse_iterator(first));
+        }
+    }
+
+private:
+    // (the two fixed coordinates, then the coordinate along `axis`)
+    static std::array<int, 3> lineOrder(int axis, const Key& k) {
+        if (axis == 0) return {k.j, k.k, k.i};
+        if (axis == 1) return {k.i, k.k, k.j};
+        return {k.i, k.j, k.k};
+    }
+    std::array<std::vector<Key>, 3> byAxis_;
+};
+
 // --- Static 3D block decomposition of the base grid ---------------------
 // (parDims3 = MPI_Dims_create.) Rank layout
 // convention: rank = cx + dims[0]*(cy + dims[1]*cz). Empty blocks (np
@@ -197,34 +249,38 @@ int blockOfCell(int c, int n, int P) {
     return c < cut ? c / (base + 1) : rem + (c - cut) / base;
 }
 
-// Per-octant octree over THIS RANK'S extended (owned + halo) box only
-// (domain decomposition -- not the whole domain). Leaves live in a
-// dense fine-cell array for O(1) neighbour queries, but the array is
-// sized to the extended box, which is what makes per-rank memory scale
-// down with np. Leaf coordinates stay GLOBAL fine-grid units throughout.
+// Per-octant octree over a box of base cells (a rank's extended =
+// owned + halo box, or the whole domain for the rank-0 assembly).
+// Leaf coordinates are GLOBAL fine-grid units throughout. The fine-cell
+// lookup walks down from the base cell's root (split children are
+// created consecutively, octant = dx + 2*dy + 4*dz), so memory scales
+// with the number of leaves, not with the fine-grid volume (R^3 per
+// base cell, which at maxLevel 11 is 8.6e9).
 class LocalOctree {
 public:
-    LocalOctree(const Decomp& dc, int R) : R_(R) {
+    LocalOctree(const int baseLo[3], const int baseHi[3], int R) : R_(R) {
         for (int a = 0; a < 3; ++a) {
-            loF_[a] = dc.extLo[a] * R;
-            hiF_[a] = dc.extHi[a] * R;
-            dimF_[a] = hiF_[a] - loF_[a];
+            bLo_[a] = baseLo[a];
+            bDim_[a] = std::max(0, baseHi[a] - baseLo[a]);
+            loF_[a] = baseLo[a] * R;
+            hiF_[a] = baseHi[a] * R;
         }
-        arr_.assign(static_cast<std::size_t>(dimF_[0]) * static_cast<std::size_t>(dimF_[1]) *
-                        static_cast<std::size_t>(dimF_[2]),
-                    -1);
-        // One initial leaf per extended-box base cell, level 0.
-        for (int bk = dc.extLo[2]; bk < dc.extHi[2]; ++bk) {
-            for (int bj = dc.extLo[1]; bj < dc.extHi[1]; ++bj) {
-                for (int bi = dc.extLo[0]; bi < dc.extHi[0]; ++bi) {
-                    const int id = newLeaf(bi * R, bj * R, bk * R, 0);
-                    fill(bi * R, bj * R, bk * R, R, id);
+        roots_.assign(static_cast<std::size_t>(bDim_[0]) * static_cast<std::size_t>(bDim_[1]) *
+                          static_cast<std::size_t>(bDim_[2]),
+                      -1);
+        // One initial leaf per base cell, level 0.
+        for (int bk = 0; bk < bDim_[2]; ++bk) {
+            for (int bj = 0; bj < bDim_[1]; ++bj) {
+                for (int bi = 0; bi < bDim_[0]; ++bi) {
+                    roots_[rootFlat(bi, bj, bk)] =
+                        newLeaf((bLo_[0] + bi) * R, (bLo_[1] + bj) * R, (bLo_[2] + bk) * R, 0);
                 }
             }
         }
     }
 
     int R() const { return R_; }
+    int leafCount() const { return static_cast<int>(leaves_.size()); }
 
     std::vector<int> liveIds() const {
         std::vector<int> out;
@@ -238,108 +294,156 @@ public:
     const Leaf& leaf(int id) const { return leaves_[static_cast<std::size_t>(id)]; }
     int leafSize(int id) const { return R_ >> leaves_[static_cast<std::size_t>(id)].level; }
 
-    // Leaf id covering GLOBAL fine cell (i,j,k); -1 outside the
-    // extended box (which subsumes "outside the domain" -- both mean
-    // "no neighbour visible", exactly the serial semantics at the
-    // domain boundary; owned leaves only ever probe one fine cell out,
-    // which is inside the extended box unless it is outside the domain).
+    // Leaf id covering GLOBAL fine cell (i,j,k); -1 outside the box
+    // (which subsumes "outside the domain" -- both mean "no neighbour
+    // visible", exactly the serial semantics at the domain boundary;
+    // owned leaves only ever probe one fine cell out, which is inside
+    // the extended box unless it is outside the domain).
     int at(int i, int j, int k) const {
         if (i < loF_[0] || i >= hiF_[0] || j < loF_[1] || j >= hiF_[1] || k < loF_[2] || k >= hiF_[2]) {
             return -1;
         }
-        return arr_[flat(i, j, k)];
+        int id = roots_[rootFlat(i / R_ - bLo_[0], j / R_ - bLo_[1], k / R_ - bLo_[2])];
+        while (firstChild_[static_cast<std::size_t>(id)] >= 0) {
+            const Leaf& L = leaves_[static_cast<std::size_t>(id)];
+            const int half = (R_ >> L.level) >> 1;
+            id = firstChild_[static_cast<std::size_t>(id)] + (i - L.i0 >= half ? 1 : 0) +
+                 (j - L.j0 >= half ? 2 : 0) + (k - L.k0 >= half ? 4 : 0);
+        }
+        return id;
     }
 
-    // Splits leaf `id` into 8 children (level+1), updating the dense
-    // array.
-    void split(int id) {
-        const Leaf parent = leaves_[static_cast<std::size_t>(id)];
-        live_[static_cast<std::size_t>(id)] = false;
-        const int childSize = R_ >> (parent.level + 1);
-        for (int dz = 0; dz <= 1; ++dz) {
-            for (int dy = 0; dy <= 1; ++dy) {
-                for (int dx = 0; dx <= 1; ++dx) {
-                    const int ci = parent.i0 + dx * childSize;
-                    const int cj = parent.j0 + dy * childSize;
-                    const int ck = parent.k0 + dz * childSize;
-                    const int cid = newLeaf(ci, cj, ck, parent.level + 1);
-                    fill(ci, cj, ck, childSize, cid);
+    // Max level of the leaves covering any fine cell of the half-open
+    // GLOBAL fine box [lo, hi) clipped to this tree's box; -1 when the
+    // clipped box is empty. Equal to the max of at() over every fine
+    // cell of the box, without visiting them one by one.
+    int maxLevelIn(const int lo[3], const int hi[3]) const {
+        int c[3], d[3];
+        for (int a = 0; a < 3; ++a) {
+            c[a] = std::max(lo[a], loF_[a]);
+            d[a] = std::min(hi[a], hiF_[a]);
+            if (c[a] >= d[a]) return -1;
+        }
+        int best = -1;
+        std::vector<int> stack;
+        for (int bk = c[2] / R_; bk <= (d[2] - 1) / R_; ++bk) {
+            for (int bj = c[1] / R_; bj <= (d[1] - 1) / R_; ++bj) {
+                for (int bi = c[0] / R_; bi <= (d[0] - 1) / R_; ++bi) {
+                    stack.push_back(roots_[rootFlat(bi - bLo_[0], bj - bLo_[1], bk - bLo_[2])]);
+                }
+            }
+        }
+        while (!stack.empty()) {
+            const int id = stack.back();
+            stack.pop_back();
+            const int fc = firstChild_[static_cast<std::size_t>(id)];
+            if (fc < 0) {
+                best = std::max(best, leaves_[static_cast<std::size_t>(id)].level);
+                continue;
+            }
+            for (int o = 0; o < 8; ++o) {
+                const Leaf& C = leaves_[static_cast<std::size_t>(fc + o)];
+                const int s = R_ >> C.level;
+                if (C.i0 < d[0] && C.i0 + s > c[0] && C.j0 < d[1] && C.j0 + s > c[1] && C.k0 < d[2] &&
+                    C.k0 + s > c[2]) {
+                    stack.push_back(fc + o);
+                }
+            }
+        }
+        return best;
+    }
+
+    // Live leaves inside the base-cell-aligned GLOBAL fine box [lo, hi),
+    // in depth-first order from the base cells taken k-major.
+    void leavesIn(const int lo[3], const int hi[3], std::vector<LeafRec>& out) const {
+        std::vector<int> stack;
+        for (int bk = lo[2] / R_; bk < hi[2] / R_; ++bk) {
+            for (int bj = lo[1] / R_; bj < hi[1] / R_; ++bj) {
+                for (int bi = lo[0] / R_; bi < hi[0] / R_; ++bi) {
+                    stack.push_back(roots_[rootFlat(bi - bLo_[0], bj - bLo_[1], bk - bLo_[2])]);
+                    while (!stack.empty()) {
+                        const int id = stack.back();
+                        stack.pop_back();
+                        const int fc = firstChild_[static_cast<std::size_t>(id)];
+                        if (fc < 0) {
+                            const Leaf& L = leaves_[static_cast<std::size_t>(id)];
+                            out.push_back(LeafRec{L.i0, L.j0, L.k0, L.level});
+                            continue;
+                        }
+                        for (int o = 7; o >= 0; --o) stack.push_back(fc + o);
+                    }
                 }
             }
         }
     }
 
+    // Splits the leaf containing fine cell (i,j,k) until it is at least
+    // `level` deep.
+    void refineTo(int i, int j, int k, int level) {
+        for (int id = at(i, j, k); leaves_[static_cast<std::size_t>(id)].level < level; id = at(i, j, k)) {
+            split(id);
+        }
+    }
+
+    // Splits leaf `id` into 8 children (level+1).
+    void split(int id) {
+        const Leaf parent = leaves_[static_cast<std::size_t>(id)];
+        live_[static_cast<std::size_t>(id)] = false;
+        const int childSize = R_ >> (parent.level + 1);
+        int first = -1;
+        for (int dz = 0; dz <= 1; ++dz) {
+            for (int dy = 0; dy <= 1; ++dy) {
+                for (int dx = 0; dx <= 1; ++dx) {
+                    const int cid = newLeaf(parent.i0 + dx * childSize, parent.j0 + dy * childSize,
+                                            parent.k0 + dz * childSize, parent.level + 1);
+                    if (first < 0) first = cid;
+                }
+            }
+        }
+        firstChild_[static_cast<std::size_t>(id)] = first;
+    }
+
 private:
-    std::size_t flat(int i, int j, int k) const {
-        return static_cast<std::size_t>(i - loF_[0]) +
-               static_cast<std::size_t>(j - loF_[1]) * static_cast<std::size_t>(dimF_[0]) +
-               static_cast<std::size_t>(k - loF_[2]) * static_cast<std::size_t>(dimF_[0]) *
-                   static_cast<std::size_t>(dimF_[1]);
+    std::size_t rootFlat(int bi, int bj, int bk) const {
+        return static_cast<std::size_t>(bi) + static_cast<std::size_t>(bj) * static_cast<std::size_t>(bDim_[0]) +
+               static_cast<std::size_t>(bk) * static_cast<std::size_t>(bDim_[0]) *
+                   static_cast<std::size_t>(bDim_[1]);
     }
 
     int newLeaf(int i0, int j0, int k0, int level) {
         leaves_.push_back(Leaf{i0, j0, k0, level});
         live_.push_back(true);
+        firstChild_.push_back(-1);
         return static_cast<int>(leaves_.size()) - 1;
     }
 
-    void fill(int i0, int j0, int k0, int size, int id) {
-        for (int k = k0; k < k0 + size; ++k) {
-            for (int j = j0; j < j0 + size; ++j) {
-                for (int i = i0; i < i0 + size; ++i) {
-                    arr_[flat(i, j, k)] = id;
-                }
-            }
-        }
-    }
-
     int R_;
-    int loF_[3] = {0, 0, 0}, hiF_[3] = {0, 0, 0}, dimF_[3] = {0, 0, 0};
+    int bLo_[3] = {0, 0, 0}, bDim_[3] = {0, 0, 0};
+    int loF_[3] = {0, 0, 0}, hiF_[3] = {0, 0, 0};
     std::vector<Leaf> leaves_;
     std::vector<char> live_;
-    std::vector<int> arr_;
+    std::vector<int> firstChild_; // -1 for a live leaf
+    std::vector<int> roots_;      // per base cell of the box
 };
 
 // --- The 2:1-grading halo exchange.
-// Exchanges the per-fine-cell LEAF LEVELS of the one-base-cell
-// boundary layer with face-neighbour ranks, one axis phase at a time
-// (x, then y, then z), each phase's slab spanning the EXTENDED range of
-// the already-exchanged axes -- the standard trick that delivers
-// edge/corner-diagonal halo cells through face-neighbour messages only.
-// Receivers IMPOSE the levels by splitting halo leaves until they match
-// (levels only ever grow, so imposition is monotone and exact). The
-// conformance-splice corner keys need no separate message type: they
-// are a pure function of these same exchanged halo levels (Refine.hpp).
-void packLevels(const LocalOctree& tree, const int lo[3], const int hi[3], std::vector<std::int8_t>& buf) {
-    buf.clear();
-    for (int k = lo[2]; k < hi[2]; ++k) {
-        for (int j = lo[1]; j < hi[1]; ++j) {
-            for (int i = lo[0]; i < hi[0]; ++i) {
-                buf.push_back(static_cast<std::int8_t>(tree.leaf(tree.at(i, j, k)).level));
-            }
-        }
-    }
-}
-
-void imposeLevels(LocalOctree& tree, const int lo[3], const int hi[3], const std::vector<std::int8_t>& buf) {
-    std::size_t idx = 0;
-    for (int k = lo[2]; k < hi[2]; ++k) {
-        for (int j = lo[1]; j < hi[1]; ++j) {
-            for (int i = lo[0]; i < hi[0]; ++i) {
-                const int want = buf[idx++];
-                while (tree.leaf(tree.at(i, j, k)).level < want) {
-                    tree.split(tree.at(i, j, k));
-                }
-            }
-        }
-    }
-}
-
+// Exchanges the LEAVES of the one-base-cell boundary layer with
+// face-neighbour ranks, one axis phase at a time (x, then y, then z),
+// each phase's slab spanning the EXTENDED range of the already-exchanged
+// axes -- the standard trick that delivers edge/corner-diagonal halo
+// cells through face-neighbour messages only. Receivers IMPOSE the
+// levels by splitting halo leaves until each received leaf's corner is
+// at least that deep; that covers the whole received leaf, since a
+// shallower local leaf overlapping it would contain it, corner
+// included (levels only ever grow, so imposition is monotone and
+// exact). The conformance-splice corner keys need no separate message
+// type: they are a pure function of these same exchanged halo levels
+// (Refine.hpp).
 void exchangeHalos(LocalOctree& tree, const Decomp& dc, int R) {
     if (dc.ownEmpty()) {
         return; // no cells, no partners (see Decomp: empty blocks stack at the high end)
     }
-    std::vector<std::int8_t> sendBuf, recvBuf;
+    std::vector<LeafRec> sendBuf, recvBuf;
     for (int axis = 0; axis < 3; ++axis) {
         // Tangential fine ranges for this phase: already-exchanged axes
         // (a < axis) use the EXTENDED range, later axes the OWN range.
@@ -353,11 +457,6 @@ void exchangeHalos(LocalOctree& tree, const Decomp& dc, int R) {
                 tHi[a] = dc.ownHi[a] * R;
             }
         }
-        std::size_t tangential = 1;
-        for (int a = 0; a < 3; ++a) {
-            if (a != axis) tangential *= static_cast<std::size_t>(tHi[a] - tLo[a]);
-        }
-        const std::size_t slabCount = tangential * static_cast<std::size_t>(R);
 
         // Partner existence: neighbour coord in range AND its block
         // non-empty (empty blocks stack at the axis' high end, so an
@@ -383,40 +482,32 @@ void exchangeHalos(LocalOctree& tree, const Decomp& dc, int R) {
             lo[axis] = fineLo;
             hi[axis] = fineLo + R;
         };
-        int sLo[3], sHi[3], rLo[3], rHi[3];
+        // Symmetric Sendrecv of a leaf list: counts first, then records
+        // (deadlock-free by construction).
+        auto shift = [&](int dest, int src, int tag) {
+            std::uint64_t nSend = sendBuf.size(), nRecv = 0;
+            parSendRecvBytes(dest, &nSend, dest >= 0 ? sizeof(nSend) : 0, src, &nRecv,
+                             src >= 0 ? sizeof(nRecv) : 0, tag);
+            recvBuf.assign(static_cast<std::size_t>(nRecv), LeafRec{});
+            parSendRecvBytes(dest, sendBuf.data(), dest >= 0 ? sendBuf.size() * sizeof(LeafRec) : 0, src,
+                             recvBuf.data(), recvBuf.size() * sizeof(LeafRec), tag + 1000);
+            for (const LeafRec& L : recvBuf) tree.refineTo(L.i0, L.j0, L.k0, L.level);
+        };
+        int sLo[3], sHi[3];
 
         // Shift in +axis direction: everyone sends its TOP owned layer
-        // to `next` and receives `prev`'s top layer into its -side halo
-        // (symmetric single Sendrecv -- deadlock-free by construction).
+        // to `next` and receives `prev`'s top layer into its -side halo.
+        sendBuf.clear();
         box(dc.ownHi[axis] * R - R, sLo, sHi);
-        box(dc.ownLo[axis] * R - R, rLo, rHi);
-        if (next >= 0) {
-            packLevels(tree, sLo, sHi, sendBuf);
-        } else {
-            sendBuf.clear();
-        }
-        recvBuf.assign(prev >= 0 ? slabCount : 0, 0);
-        parSendRecvBytes(next, sendBuf.data(), sendBuf.size(), prev, recvBuf.data(), recvBuf.size(),
-                         100 + axis);
-        if (prev >= 0) {
-            imposeLevels(tree, rLo, rHi, recvBuf);
-        }
+        if (next >= 0) tree.leavesIn(sLo, sHi, sendBuf);
+        shift(next, prev, 100 + axis);
 
         // Shift in -axis direction: send my BOTTOM owned layer to
         // `prev`, receive `next`'s bottom layer into my +side halo.
+        sendBuf.clear();
         box(dc.ownLo[axis] * R, sLo, sHi);
-        box(dc.ownHi[axis] * R, rLo, rHi);
-        if (prev >= 0) {
-            packLevels(tree, sLo, sHi, sendBuf);
-        } else {
-            sendBuf.clear();
-        }
-        recvBuf.assign(next >= 0 ? slabCount : 0, 0);
-        parSendRecvBytes(prev, sendBuf.data(), sendBuf.size(), next, recvBuf.data(), recvBuf.size(),
-                         200 + axis);
-        if (next >= 0) {
-            imposeLevels(tree, rLo, rHi, recvBuf);
-        }
+        if (prev >= 0) tree.leavesIn(sLo, sHi, sendBuf);
+        shift(prev, next, 200 + axis);
     }
 }
 
@@ -453,7 +544,7 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
     }
 
     const Decomp dc = makeDecomp(nx, ny, nz);
-    LocalOctree tree(dc, R);
+    LocalOctree tree(dc.extLo, dc.extHi, R);
 
     auto centroidOf = [&](int i0, int j0, int k0, int size) {
         return Vec3{cfg.min.x + (cfg.max.x - cfg.min.x) * (i0 + size * 0.5) / (nx * R),
@@ -461,26 +552,34 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
                     cfg.min.z + (cfg.max.z - cfg.min.z) * (k0 + size * 0.5) / (nz * R)};
     };
 
-    auto targetLevelOf = [&](int i0, int j0, int k0, int size) {
-        const Vec3 c = centroidOf(i0, j0, k0, size);
-        int lvl = 0;
-        for (std::size_t r = 0; r < regions.size(); ++r) {
-            const RefineRegion& reg = regions[r];
-            bool inside = false;
-            if (reg.type == "box") {
-                inside = c.x >= reg.min.x && c.x <= reg.max.x && c.y >= reg.min.y && c.y <= reg.max.y &&
-                         c.z >= reg.min.z && c.z <= reg.max.z;
-            } else if (reg.type == "sphere") {
-                const Vec3 d = c - reg.centre;
-                inside = dot(d, d) <= reg.radius * reg.radius;
-            } else if (reg.type == "surface") {
-                inside = anyTriangleWithin(surfaceBins[r], c, reg.distance);
-            } else {
-                throw std::runtime_error("Refine error: unknown region type '" + reg.type + "'");
-            }
-            if (inside) lvl = std::max(lvl, reg.level);
+    for (const RefineRegion& reg : regions) {
+        if (reg.type != "box" && reg.type != "sphere" && reg.type != "surface") {
+            throw std::runtime_error("Refine error: unknown region type '" + reg.type + "'");
         }
-        return lvl;
+    }
+    // True when some region deeper than `level` contains the leaf's
+    // centroid, i.e. when the leaf must split. Cheap region types are
+    // tested first; the first hit decides.
+    auto wantsSplit = [&](int i0, int j0, int k0, int size, int level) {
+        const Vec3 c = centroidOf(i0, j0, k0, size);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (std::size_t r = 0; r < regions.size(); ++r) {
+                const RefineRegion& reg = regions[r];
+                if (reg.level <= level || (reg.type == "surface") != (pass == 1)) continue;
+                bool inside = false;
+                if (reg.type == "box") {
+                    inside = c.x >= reg.min.x && c.x <= reg.max.x && c.y >= reg.min.y && c.y <= reg.max.y &&
+                             c.z >= reg.min.z && c.z <= reg.max.z;
+                } else if (reg.type == "sphere") {
+                    const Vec3 d = c - reg.centre;
+                    inside = dot(d, d) <= reg.radius * reg.radius;
+                } else {
+                    inside = anyTriangleWithin(surfaceBins[r], c, reg.distance);
+                }
+                if (inside) return true;
+            }
+        }
+        return false;
     };
 
     auto ownsLeaf = [&](const Leaf& L) {
@@ -501,77 +600,86 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
     // per-rank chaotic iteration converges to the same unique least
     // fixpoint as the serial sweep -- the final leaf set is
     // partition-invariant by construction (and gated byte-identically).
+    std::vector<char> settled; // per leaf id: Pass A found no split needed
+    // NINJA_STAGE_TIMES: one line per marking/grading sweep.
+    static const bool showProgress = std::getenv("NINJA_STAGE_TIMES") != nullptr;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto progress = [&](const char* what, std::size_t live, std::size_t nSplit) {
+        if (!showProgress || parRank() != 0) return;
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << "refine " << what << " rank 0: " << live << " live leaves, " << nSplit << " split, " << t
+                  << " s\n" << std::flush;
+    };
     bool outerChanged = true;
     while (outerChanged) {
         int changed = 0;
 
         // Pass A: region/distance marking (owned leaves only -- each
         // leaf has exactly one owner, so the -- possibly expensive --
-        // distance predicate is evaluated exactly once globally).
+        // distance predicate is evaluated exactly once globally; a leaf
+        // found not to need a split keeps that answer, the predicate
+        // being a pure function of the leaf).
         {
-            std::vector<int> toSplit;
-            for (int id : tree.liveIds()) {
+            const std::vector<int> ids = tree.liveIds();
+            std::vector<char> split(ids.size(), 0);
+            settled.resize(std::max(settled.size(), static_cast<std::size_t>(tree.leafCount())), 0);
+#pragma omp parallel for schedule(dynamic, 256)
+            for (std::size_t n = 0; n < ids.size(); ++n) {
+                const int id = ids[n];
+                if (settled[static_cast<std::size_t>(id)] != 0) continue;
                 const Leaf& L = tree.leaf(id);
                 if (!ownsLeaf(L)) continue;
-                const int size = tree.leafSize(id);
-                const int target = targetLevelOf(L.i0, L.j0, L.k0, size);
-                if (L.level < target) {
-                    toSplit.push_back(id);
-                }
+                split[n] = wantsSplit(L.i0, L.j0, L.k0, tree.leafSize(id), L.level) ? 1 : 0;
+                if (split[n] == 0) settled[static_cast<std::size_t>(id)] = 1;
             }
-            for (int id : toSplit) {
-                tree.split(id);
+            std::size_t nSplit = 0;
+            for (std::size_t n = 0; n < ids.size(); ++n) {
+                if (split[n] == 0) continue;
+                tree.split(ids[n]);
                 changed = 1;
+                ++nSplit;
             }
+            progress("mark", ids.size(), nSplit);
         }
 
         // Pass B: 2:1 grading on owned leaves, halo-exchanged and
         // iterated to a GLOBAL fixpoint.
         for (;;) {
             exchangeHalos(tree, dc, R);
-            std::vector<int> toSplit;
-            for (int id : tree.liveIds()) {
+            const std::vector<int> ids = tree.liveIds();
+            std::vector<char> split(ids.size(), 0);
+#pragma omp parallel for schedule(dynamic, 512)
+            for (std::size_t n = 0; n < ids.size(); ++n) {
+                const int id = ids[n];
                 const Leaf& L = tree.leaf(id);
                 if (!ownsLeaf(L)) continue;
                 const int size = tree.leafSize(id);
+                // Max level over the one-fine-cell slab beyond each face
+                // (grading only needs the MAX level touching the face).
                 int maxNeighLevel = L.level;
                 for (int dir = 0; dir < 6; ++dir) {
-                    // Sample the whole shared face at unit fine-grid
-                    // spacing; grading only needs the MAX level touching
-                    // this face.
-                    if (dir == 0 || dir == 1) {
-                        const int ni = dir == 0 ? L.i0 - 1 : L.i0 + size;
-                        for (int j = L.j0; j < L.j0 + size; ++j) {
-                            for (int k = L.k0; k < L.k0 + size; ++k) {
-                                const int nid = tree.at(ni, j, k);
-                                if (nid >= 0) maxNeighLevel = std::max(maxNeighLevel, tree.leaf(nid).level);
-                            }
-                        }
-                    } else if (dir == 2 || dir == 3) {
-                        const int nj = dir == 2 ? L.j0 - 1 : L.j0 + size;
-                        for (int i = L.i0; i < L.i0 + size; ++i) {
-                            for (int k = L.k0; k < L.k0 + size; ++k) {
-                                const int nid = tree.at(i, nj, k);
-                                if (nid >= 0) maxNeighLevel = std::max(maxNeighLevel, tree.leaf(nid).level);
-                            }
-                        }
+                    int lo[3] = {L.i0, L.j0, L.k0};
+                    int hi[3] = {L.i0 + size, L.j0 + size, L.k0 + size};
+                    const int a = dir / 2;
+                    if (dir % 2 == 0) {
+                        hi[a] = lo[a];
+                        lo[a] -= 1;
                     } else {
-                        const int nk = dir == 4 ? L.k0 - 1 : L.k0 + size;
-                        for (int i = L.i0; i < L.i0 + size; ++i) {
-                            for (int j = L.j0; j < L.j0 + size; ++j) {
-                                const int nid = tree.at(i, j, nk);
-                                if (nid >= 0) maxNeighLevel = std::max(maxNeighLevel, tree.leaf(nid).level);
-                            }
-                        }
+                        lo[a] = hi[a];
+                        hi[a] += 1;
                     }
+                    maxNeighLevel = std::max(maxNeighLevel, tree.maxLevelIn(lo, hi));
                 }
-                if (maxNeighLevel - 1 > L.level) {
-                    toSplit.push_back(id);
-                }
+                if (maxNeighLevel - 1 > L.level) split[n] = 1;
+            }
+            std::vector<int> toSplit;
+            for (std::size_t n = 0; n < ids.size(); ++n) {
+                if (split[n] != 0) toSplit.push_back(ids[n]);
             }
             for (int id : toSplit) {
                 tree.split(id);
             }
+            progress("grade", ids.size(), toSplit.size());
             int g = toSplit.empty() ? 0 : 1;
             changed |= g;
             parAllreduceSumInts(&g, 1);
@@ -605,21 +713,9 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
     // consecutive sub-segments).
     const int nxF = nx * R;
     const int nyF = ny * R;
-    // Lattice bitmaps over the extended box (points extLo*R..extHi*R
-    // inclusive per axis) -- bytes per fine lattice point, block-local.
-    int latLo[3], latDim[3];
-    for (int a = 0; a < 3; ++a) {
-        latLo[a] = dc.extLo[a] * R;
-        latDim[a] = dc.extHi[a] * R - latLo[a] + 1;
-    }
-    const std::size_t latTotal = static_cast<std::size_t>(latDim[0]) * static_cast<std::size_t>(latDim[1]) *
-                                 static_cast<std::size_t>(latDim[2]);
-    auto latIdx = [&](const Key& kk) {
-        return static_cast<std::size_t>(kk.i - latLo[0]) +
-               static_cast<std::size_t>(kk.j - latLo[1]) * static_cast<std::size_t>(latDim[0]) +
-               static_cast<std::size_t>(kk.k - latLo[2]) * static_cast<std::size_t>(latDim[0]) *
-                   static_cast<std::size_t>(latDim[1]);
-    };
+    // Global lattice flat of a point key: ascending flat == ascending
+    // (k, j, i), the point order.
+    auto flatOf = [&](const Key& kk) { return fineLatticeFlat(kk.i, kk.j, kk.k, nxF, nyF); };
 
     // Face subdivision factor F for a leaf face, EXACTLY the serial
     // assembly's quadrant-probe logic (a probe outside the extended box
@@ -680,7 +776,7 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
     // ranks' quad corners are REGENERATED here from the exchanged halo
     // levels (a pure function of leaf geometry) instead of being
     // messaged as explicit keys.
-    std::vector<char> cornerBit(latTotal, 0);
+    std::vector<Key> cornerKeys;
     const std::vector<int> liveAll = tree.liveIds();
     for (int id : liveAll) {
         const Leaf& L = tree.leaf(id);
@@ -691,15 +787,14 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
             for (int p = 0; p < F; ++p) {
                 for (int q = 0; q < F; ++q) {
                     const std::array<Key, 4> c = subQuadCorners(dir, L.i0, L.j0, L.k0, size, F, p, q);
-                    for (const Key& kk : c) {
-                        cornerBit[latIdx(kk)] = 1;
-                    }
+                    cornerKeys.insert(cornerKeys.end(), c.begin(), c.end());
                 }
             }
         }
     }
+    const CornerLines corners(std::move(cornerKeys));
 
-    // Pass 2: owned leaves' quads, spliced against the corner bitmap
+    // Pass 2: owned leaves' quads, spliced against the corner set
     // (the serial conformance rule verbatim: insert every fine-grid
     // point strictly inside the edge that is used as a corner anywhere,
     // sorted along the edge); consecutive loop pairs are the serial
@@ -707,7 +802,6 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
     // exactly one rank, so per-edge work/stats partition exactly): the
     // rank owning the base cell at the edge's min corner, +side on
     // shared planes, clamped at the domain max plane.
-    auto signOf = [](int v) { return (v > 0) - (v < 0); };
     auto edgeOwnedByMe = [&](const Key& u, const Key& v) {
         for (int a = 0; a < 3; ++a) {
             const int ua = a == 0 ? u.i : (a == 1 ? u.j : u.k);
@@ -725,7 +819,7 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
         return true;
     };
 
-    std::vector<char> pointBit(latTotal, 0);
+    std::vector<Key> pointKeys;
     std::vector<std::pair<std::int64_t, std::int64_t>> edgePairs;
     std::vector<Key> loop;
     for (int id : liveAll) {
@@ -740,29 +834,17 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
                     const std::array<Key, 4> c = subQuadCorners(dir, L.i0, L.j0, L.k0, size, F, p, q);
                     loop.clear();
                     for (std::size_t e = 0; e < 4; ++e) {
-                        const Key& a = c[e];
-                        const Key& b = c[(e + 1) % 4];
-                        loop.push_back(a);
-                        const int di = signOf(b.i - a.i);
-                        const int dj = signOf(b.j - a.j);
-                        const int dk = signOf(b.k - a.k);
-                        const int steps =
-                            std::max({std::abs(b.i - a.i), std::abs(b.j - a.j), std::abs(b.k - a.k)});
-                        for (int s = 1; s < steps; ++s) {
-                            const Key cand{a.i + di * s, a.j + dj * s, a.k + dk * s};
-                            if (cornerBit[latIdx(cand)] != 0) {
-                                loop.push_back(cand);
-                            }
-                        }
+                        loop.push_back(c[e]);
+                        corners.appendInterior(c[e], c[(e + 1) % 4], loop);
                     }
                     const std::size_t n = loop.size();
                     for (std::size_t e = 0; e < n; ++e) {
                         const Key& u = loop[e];
                         const Key& v = loop[(e + 1) % n];
-                        pointBit[latIdx(u)] = 1;
+                        pointKeys.push_back(u);
                         if (edgeOwnedByMe(u, v)) {
-                            std::int64_t fu = static_cast<std::int64_t>(latIdx(u));
-                            std::int64_t fv = static_cast<std::int64_t>(latIdx(v));
+                            std::int64_t fu = flatOf(u);
+                            std::int64_t fv = flatOf(v);
                             if (fu > fv) std::swap(fu, fv);
                             edgePairs.emplace_back(fu, fv);
                         }
@@ -779,14 +861,17 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
     // Refine.hpp) so gathered values are bit-identical to the serial
     // classification's inputs.
     const bool baseFormula = regions.empty();
-    std::vector<int> latToLocal(latTotal, -1);
-    for (std::size_t li = 0; li < latTotal; ++li) {
-        if (pointBit[li] == 0) continue;
-        const int i = latLo[0] + static_cast<int>(li % static_cast<std::size_t>(latDim[0]));
-        const int j =
-            latLo[1] + static_cast<int>((li / static_cast<std::size_t>(latDim[0])) % static_cast<std::size_t>(latDim[1]));
-        const int k = latLo[2] + static_cast<int>(li / (static_cast<std::size_t>(latDim[0]) *
-                                                        static_cast<std::size_t>(latDim[1])));
+    auto latticeLess = [](const Key& u, const Key& v) {
+        if (u.k != v.k) return u.k < v.k;
+        if (u.j != v.j) return u.j < v.j;
+        return u.i < v.i;
+    };
+    std::sort(pointKeys.begin(), pointKeys.end(), latticeLess);
+    pointKeys.erase(std::unique(pointKeys.begin(), pointKeys.end()), pointKeys.end());
+    for (const Key& pk : pointKeys) {
+        const int i = pk.i;
+        const int j = pk.j;
+        const int k = pk.k;
         Vec3 pt;
         if (baseFormula) {
             pt = Vec3{cfg.min.x + (cfg.max.x - cfg.min.x) * (static_cast<double>(i) / nx),
@@ -797,7 +882,6 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
                       cfg.min.y + (cfg.max.y - cfg.min.y) * static_cast<double>(j) / (ny * R),
                       cfg.min.z + (cfg.max.z - cfg.min.z) * static_cast<double>(k) / (nz * R)};
         }
-        latToLocal[li] = static_cast<int>(out.points.size());
         out.points.push_back(pt);
         out.pointFlat.push_back(fineLatticeFlat(i, j, k, nxF, nyF));
         // The 8 fine cells around the lattice point; a probe outside the
@@ -814,10 +898,13 @@ LocalRefine refineLocal(const MeshConfig& cfg, const std::vector<RefineRegion>& 
         }
         out.pointFinestLevel.push_back(finest);
     }
+    auto localOf = [&](std::int64_t f) {
+        return static_cast<int>(std::lower_bound(out.pointFlat.begin(), out.pointFlat.end(), f) -
+                                out.pointFlat.begin());
+    };
     out.edges.reserve(edgePairs.size());
     for (const auto& [fu, fv] : edgePairs) {
-        out.edges.push_back(makeEdgeKey(latToLocal[static_cast<std::size_t>(fu)],
-                                        latToLocal[static_cast<std::size_t>(fv)]));
+        out.edges.push_back(makeEdgeKey(localOf(fu), localOf(fv)));
     }
     return out;
 }
@@ -838,37 +925,21 @@ AssembledRefine assembleRefined(const MeshConfig& cfg, const std::vector<LeafRec
         }
     }
 
-    // Dense global fine-cell -> leaf-id array (rank-0 only; the accepted
-    // gather-time full-grid footprint -- the decided rank-0 ceiling).
-    std::vector<int> arr(
-        static_cast<std::size_t>(nxF) * static_cast<std::size_t>(nyF) * static_cast<std::size_t>(nzF), -1);
-    auto flat = [&](int i, int j, int k) {
-        return static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * static_cast<std::size_t>(nxF) +
-               static_cast<std::size_t>(k) * static_cast<std::size_t>(nxF) * static_cast<std::size_t>(nyF);
-    };
-    for (std::size_t id = 0; id < leaves.size(); ++id) {
-        const LeafRec& L = leaves[id];
-        const int size = R >> L.level;
-        for (int k = L.k0; k < L.k0 + size; ++k) {
-            for (int j = L.j0; j < L.j0 + size; ++j) {
-                for (int i = L.i0; i < L.i0 + size; ++i) {
-                    arr[flat(i, j, k)] = static_cast<int>(id);
-                }
-            }
-        }
-    }
-    auto at = [&](int i, int j, int k) {
-        if (i < 0 || i >= nxF || j < 0 || j >= nyF || k < 0 || k >= nzF) return -1;
-        return arr[flat(i, j, k)];
-    };
+    // Global fine-cell -> leaf lookup, rebuilt from the gathered leaf
+    // set (only equality of the returned ids is used below).
+    const int baseLo[3] = {0, 0, 0};
+    const int baseHi[3] = {nx, ny, nz};
+    LocalOctree lookup(baseLo, baseHi, R);
+    for (const LeafRec& L : leaves) lookup.refineTo(L.i0, L.j0, L.k0, L.level);
+    auto at = [&](int i, int j, int k) { return lookup.at(i, j, k); };
 
     // --- From here on: the serial assembly, identical in
     // logic (deterministic leaf numbering; quad emission; generalized
     // conformance splice; sorted-key point ids; signature adjacency;
     // upper-triangular internal faces; patches in dict order) -- a pure
     // function of the final leaf set, so byte-identical for every rank
-    // count. Only the container changed (gathered LeafRec list + dense
-    // array instead of the old whole-domain Octree object).
+    // count. Only the container changed (the gathered LeafRec list
+    // rebuilt into a sparse LocalOctree for the neighbour probes).
     std::vector<int> liveIds(leaves.size());
     for (std::size_t i = 0; i < leaves.size(); ++i) liveIds[i] = static_cast<int>(i);
     std::sort(liveIds.begin(), liveIds.end(), [&](int a, int b) {
@@ -964,19 +1035,11 @@ AssembledRefine assembleRefined(const MeshConfig& cfg, const std::vector<LeafRec
         }
     }
 
-    // Conformance pass, GENERALIZED -- the container is a
-    // sorted-unique flat Key vector queried by binary search instead of
-    // a std::set (measured assemble peak drove the change).
-    // Membership answers are identical.
-    std::vector<Key> usedAsCorner(rawQuads.keys);
-    std::sort(usedAsCorner.begin(), usedAsCorner.end());
-    usedAsCorner.erase(std::unique(usedAsCorner.begin(), usedAsCorner.end()), usedAsCorner.end());
-    usedAsCorner.shrink_to_fit();
-    auto isUsedAsCorner = [&](const Key& k) {
-        return std::binary_search(usedAsCorner.begin(), usedAsCorner.end(), k);
-    };
-    auto signOf = [](int v) { return (v > 0) - (v < 0); };
+    // Conformance pass, GENERALIZED: every lattice point strictly inside
+    // a quad edge that is used as a corner anywhere is spliced in,
+    // sorted along the edge (CornerLines).
     {
+        const CornerLines corners(rawQuads.keys);
         QuadStore spliced;
         spliced.cell.reserve(rawQuads.cell.size());
         std::vector<Key> loop;
@@ -986,19 +1049,8 @@ AssembledRefine assembleRefined(const MeshConfig& cfg, const std::vector<LeafRec
             const int n = rawQuads.count(q);
             loop.clear();
             for (int e = 0; e < n; ++e) {
-                const Key& a = pts[e];
-                const Key& b = pts[(e + 1) % n];
-                loop.push_back(a);
-                const int di = signOf(b.i - a.i);
-                const int dj = signOf(b.j - a.j);
-                const int dk = signOf(b.k - a.k);
-                const int steps = std::max({std::abs(b.i - a.i), std::abs(b.j - a.j), std::abs(b.k - a.k)});
-                for (int s = 1; s < steps; ++s) {
-                    const Key cand{a.i + di * s, a.j + dj * s, a.k + dk * s};
-                    if (isUsedAsCorner(cand)) {
-                        loop.push_back(cand);
-                    }
-                }
+                loop.push_back(pts[e]);
+                corners.appendInterior(pts[e], pts[(e + 1) % n], loop);
             }
             spliced.append(loop.data(), static_cast<int>(loop.size()), rawQuads.cell[static_cast<std::size_t>(q)],
                            rawQuads.side[static_cast<std::size_t>(q)]);
