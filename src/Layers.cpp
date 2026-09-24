@@ -186,7 +186,7 @@ Vec3 loopCentroid(const std::vector<Vec3>& loop) {
 // built on. Left untouched when an earlier check rejects the prism.
 bool prismValid(const std::vector<Vec3>& top, const std::vector<Vec3>& bot, double minHeight, double minVolEps,
                 int* failCode = nullptr, double maxAspect = 0.0, double minAchievedHeight = 0.0,
-                double* meanHeightOut = nullptr, bool exactReflex = false) {
+                double* meanHeightOut = nullptr) {
     if (failCode) *failCode = 0;
     const std::size_t n = top.size();
     if (n != bot.size() || n < 3) {
@@ -236,23 +236,16 @@ bool prismValid(const std::vector<Vec3>& top, const std::vector<Vec3>& bot, doub
             return false;
         }
     }
-    if (exactReflex) {
-        for (std::size_t i = 1; i + 1 < n; ++i) {
-            const Vec3 bn0 = cross(bot[1] - bot[0], bot[2] - bot[0]);
-            const Vec3 bni = cross(bot[i] - bot[0], bot[(i + 1) % n] - bot[0]);
-            if (dot(bn0, bni) < 0.0) {
-                if (failCode) *failCode = 4;
-                return false;
-            }
-        }
-    } else {
+    {
         // Reference = the loop's own Newell normal (the first fan triangle is
         // pure noise when bot[1] is a collinear hanging node -- every wall
         // face at a refinement-level transition has one), and a fan triangle
         // only counts as reflex when its negative area is a meaningful
         // fraction of the face (relative, not an exact sign test). The
-        // non-inversion clamp keeps the exact test (`exactReflex`): it only
-        // shortens steps, so there the strict answer is the safe one.
+        // non-inversion clamp uses the same test: with the exact one it
+        // halved every point of such a face on a coin flip and crushed the
+        // healthy prisms sharing them (MEASURED, hydrofoil window: 828 of 901
+        // collapsed stacks, 1831 -> 799 dropped faces).
         const Vec3 bN = newellNormal(bot); // |bN| ~ 2 * area
         const double bN2 = dot(bN, bN);
         for (std::size_t i = 1; i + 1 < n; ++i) {
@@ -1741,8 +1734,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 // the healthy stacks that share them.
                 if (faceHeld(fi)) continue;
                 const double fs = faceScale[static_cast<std::size_t>(fi)];
-                const bool valid = prismValid(topLoop, botLoop, /*minHeight=*/0.0, minVolEps * fs * fs * fs, nullptr, 0.0, 0.0,
-                                              nullptr, /*exactReflex=*/true);
+                const bool valid = prismValid(topLoop, botLoop, /*minHeight=*/0.0, minVolEps * fs * fs * fs);
                 if (!valid) {
                     anyInvalid = true;
                     ++nInvalidThisIter;
