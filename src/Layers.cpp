@@ -1062,8 +1062,10 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
     // coverage accounting below. MEASURED, win_gate_seam: 355 of the 378
     // "dropped" faces and 89 of the 95.5 m2 of "infeasible" wall were faces
     // of one discarded 669-cell component -- none of them in the written mesh.
-    const std::vector<char> coreReached = reachableCellsFromLocation(cutMeshIn, locationInMesh);
-    const int nCoreCells = cutMeshIn.nCells();
+    // Extended with every prism as it is emitted: a prism ships iff the core
+    // cell its stack grows from does, so the filter holds on EVERY step, not
+    // only on the first (where the front's owner is still a core cell).
+    std::vector<char> cellReached = reachableCellsFromLocation(cutMeshIn, locationInMesh);
 
     // name -> original patch ordinal, for locating each spec's wall patch.
     std::unordered_map<std::string, int> patchNameToOrdinal;
@@ -2640,7 +2642,10 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         for (int fi = 0; fi < nTop; ++fi) {
             if (!reverted[static_cast<std::size_t>(fi)]) continue;
             const int ownerHere = wallBucket.owner[static_cast<std::size_t>(fi)];
-            if (ownerHere < nCoreCells && !coreReached[static_cast<std::size_t>(ownerHere)]) continue; // never ships
+            if (ownerHere >= 0 && static_cast<std::size_t>(ownerHere) < cellReached.size() &&
+                !cellReached[static_cast<std::size_t>(ownerHere)]) {
+                continue; // never ships
+            }
             ++stats.perStepDropped[static_cast<std::size_t>(step)];
             const int o = faceOrigin[static_cast<std::size_t>(fi)];
             if (o >= 0 && droppedOrigins.insert(o).second) {
@@ -2722,6 +2727,9 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 pointSpent[static_cast<std::size_t>(p)] = 1;
             }
             const int coreCell = wallBucket.owner[static_cast<std::size_t>(fi)];
+            if (static_cast<std::size_t>(prismCell) >= cellReached.size()) cellReached.resize(static_cast<std::size_t>(prismCell) + 1, 1);
+            cellReached[static_cast<std::size_t>(prismCell)] =
+                static_cast<std::size_t>(coreCell) < cellReached.size() ? cellReached[static_cast<std::size_t>(coreCell)] : 1;
             // Top face becomes internal: owner (core) < neighbour
             // (prism) always holds since prism indices are appended
             // after every pre-existing cell.
