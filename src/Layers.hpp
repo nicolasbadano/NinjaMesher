@@ -107,15 +107,14 @@ enum LayerDropReason : int {
     kDropSkew = 15,
     kDropNonOrth = 16,
     kDropCondemned = 17, // its stack was condemned by an earlier gate pass
-    kDropNeighbour = 18, // one-ring dilation of a failing face
-    kDropHeldSeam = 19,  // shares a spent point with a terrace; never extruded again
-    kNumLayerDropReasons = 20
+    kDropHeldSeam = 18,  // shares a spent point with a terrace; never extruded again
+    kNumLayerDropReasons = 19
 };
 inline const char* layerDropReasonName(int r) {
     static const char* const names[kNumLayerDropReasons] = {
         "unknown", "degenerateLoop", "stepTooShort", "sideTwist", "bottomNonConvex", "volume", "bottomFolded",
         "sideInverted", "meanHeight", "aspect", "collapsed", "sealed", "forced", "pyramid",
-        "tet", "skew", "nonOrth", "condemned", "neighbour", "heldSeam"};
+        "tet", "skew", "nonOrth", "condemned", "heldSeam"};
     return r >= 0 && r < kNumLayerDropReasons ? names[r] : "unknown";
 }
 

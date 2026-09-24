@@ -255,7 +255,9 @@ add_test(NAME desc_coarse
 # of bm_layers_wfp at grid factor 4, layers off and on. Before the three
 # boundary-skew tests (cutMesh post-pass, mergeSlivers group gate, planarize
 # fan choice) they shipped one face each at skewness 15.5828 and 4.28628.
-# ~10 s and ~1 min. Last argument: the measured total volume.
+# ~10 s and ~1 min. Last argument: the measured total volume (layers on:
+# 30.77 with layers off; 26.58 while a failing face also dropped its
+# one-ring neighbours).
 add_test(NAME wfp_coarse_cut
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_wfpcoarse.sh
                  $<TARGET_FILE:ninjaMesher>
@@ -263,7 +265,7 @@ add_test(NAME wfp_coarse_cut
 add_test(NAME wfp_coarse_layers
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_wfpcoarse.sh
                  $<TARGET_FILE:ninjaMesher>
-                 ${CMAKE_CURRENT_SOURCE_DIR}/Tests/cases/win_wfp_coarse_layers 26.5826)
+                 ${CMAKE_CURRENT_SOURCE_DIR}/Tests/cases/win_wfp_coarse_layers 30.54)
 
 # The drop-locally seam-closure path, forced deterministically via the
 # layersDebug{forceDropSphere} scaffold on the offset_sphere

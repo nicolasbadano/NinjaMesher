@@ -25,9 +25,11 @@
 #     discarded components were counted too, 50+% while the terrace-seam
 #     cascade still dropped the healthy stacks beside every genuine
 #     failure);
-#   * total volume within 2% of the measured 382.197 m3, so the guard
+#   * total volume within 2% of the measured 393.974 m3, so the guard
 #     cannot be "fixed" in future by deleting mesh (364.808 before the
-#     cascade fix: the layers it now keeps are volume it used to lose);
+#     cascade fix, 382.197 while a failing face also dropped its one-ring
+#     neighbours: the layers it now keeps are volume it used to lose;
+#     411.537 with layers off);
 #   * determinism: a second np=1 run is byte-identical.
 #
 # Usage: test_desccoarse.sh <ninjaMesher-exe> <caseDir>
@@ -93,7 +95,7 @@ elif ! python3 -c "import sys; w=float(sys.argv[1]); i=float(sys.argv[2]); sys.e
     status=1
 fi
 
-# checkMesh prints "Total volume = 382.197." -- the sentence's full stop
+# checkMesh prints "Total volume = 393.974." -- the sentence's full stop
 # is part of the match, so it is trimmed here.
 VOL=$(grep -E "Total volume" "$TMP/checkmesh.log" | sed -E 's/.*Total volume = ([0-9.eE+-]+?)\.? .*/\1/' | head -1 || true)
 VOL=${VOL%.}
@@ -101,8 +103,8 @@ echo "measured Total volume = ${VOL:-<missing>}"
 if [ -z "${VOL:-}" ]; then
     echo "FAIL: checkMesh reported no Total volume"
     status=1
-elif ! python3 -c "import sys; v=float(sys.argv[1]); sys.exit(0 if abs(v-382.197)/382.197 <= 0.02 else 1)" "$VOL"; then
-    echo "FAIL: total volume $VOL outside 382.197 +- 2%"
+elif ! python3 -c "import sys; v=float(sys.argv[1]); sys.exit(0 if abs(v-393.974)/393.974 <= 0.02 else 1)" "$VOL"; then
+    echo "FAIL: total volume $VOL outside 393.974 +- 2%"
     status=1
 fi
 

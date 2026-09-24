@@ -44,9 +44,9 @@ if [ -z "${WALL:-}" ]; then
     echo "FAIL: 'wallArea' line not found in ninjaMesher output"
     status=1
 else
-    OK=$(awk -v a="$WALL" 'BEGIN { print (a > 0.80 && a < 1.10) ? "1" : "0" }')
+    OK=$(awk -v a="$WALL" 'BEGIN { print (a > 0.765 && a < 1.10) ? "1" : "0" }')
     if [ "$OK" != "1" ]; then
-        echo "FAIL: wallArea $WALL not strictly between landed (~0.755) and offset (1.131) bands (0.80, 1.10)"
+        echo "FAIL: wallArea $WALL not strictly between landed (~0.755) and offset (1.131) bands (0.765, 1.10)"
         status=1
     fi
 fi

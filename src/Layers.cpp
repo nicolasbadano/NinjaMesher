@@ -127,9 +127,8 @@ constexpr double kReflexAreaFrac = 0.01;
 // sliver's ~1e-3 cut facet vs a ~2e-2 step) ANY differential march is
 // a huge relative distortion -- the stretch clamp crushes those points
 // to ~0 while their neighbours march in full, the lopsided quads fail
-// the twist test, and the drop dilation eats the healthy one-ring
-// (measured: 63/152 seed failures, all at or adjacent to micro
-// facets). Marching the cluster as one rigid body removes the
+// the twist test (measured: 63/152 seed failures, all at or adjacent
+// to micro facets). Marching the cluster as one rigid body removes the
 // distortion by construction: micro facets extrude as thin-but-valid
 // prisms and their neighbours see no relative motion across the shared
 // edge.
@@ -922,7 +921,7 @@ Vec3 planeNormal(int plane) {
 // concentrates at the wall-adjacent layers, so peel-back would buy
 // nothing over whole-stack removal.
 // Removal is expressed through the march's OWN drop path (the face is
-// marked `dilated`, i.e. reverted to a plain wall face at the offset
+// marked `reverted`, i.e. reverted to a plain wall face at the offset
 // cut, and its seam is closed by the existing side-face rule), so the
 // result is topologically identical to "this face never extruded";
 // there is no post-hoc cell surgery. Because a condemned stack is only
@@ -2342,8 +2341,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         // kMaxGatePasses and never converged on that terrain (443, 218,
         // 189, 144, 127, 148 newly condemned stacks per pass), so 148
         // known-bad stacks SHIPPED. The gate loop is kept as a safety
-        // net; with this guard it should find nothing. Deliberately not
-        // one-ring dilated (same reasoning as the gate's removals).
+        // net; with this guard it should find nothing.
         std::vector<char> qualityBad(static_cast<std::size_t>(nTop), 0);
         std::vector<int> dropReason(static_cast<std::size_t>(nTop), 0); // LayerDropReason; 0 = not refused itself
         std::vector<LayerCellQuality> faceQuality(static_cast<std::size_t>(nTop));
@@ -2363,10 +2361,9 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             bool valid = prismValid(topLoop, botLoop, minHeight * fs, minVolEps * fs * fs * fs, &fcode, kMaxPrismAspect,
                                     minAchievedHeightFrac() * tStepF, &meanHeight);
             // A held face (see faceHeld) is never extruded -- it stays a wall
-            // face for the rest of the march -- and (below) never dilates.
-            // MEASURED (bm_layers_wfp): re-extruding the terrace seams always
-            // failed and one-ring dilated onto the healthy stack beside them,
-            // every step -- 19474 -> 8979 dropped faces from holding them.
+            // face for the rest of the march. MEASURED (bm_layers_wfp):
+            // re-extruding the terrace seams always failed, every step --
+            // 19474 -> 8979 dropped faces from holding them.
             // fcode 99 keeps a held face out of every guard's own accounting.
             if (faceHeld(fi)) {
                 valid = false;
@@ -2499,47 +2496,36 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
             faceValid[static_cast<std::size_t>(fi)] = valid;
         }
-        // One-ring dilation of the failing set.
-        std::vector<bool> dropped = faceValid;
-        for (std::size_t i = 0; i < dropped.size(); ++i) dropped[i] = !dropped[i];
-        std::vector<bool> dilated = dropped;
-        for (int fi = 0; fi < nTop; ++fi) {
-            if (!dropped[static_cast<std::size_t>(fi)]) continue;
-            if (faceHeld(fi)) continue; // held, not failing: nothing to dilate
-            const IntSpan fp = wallBucket.pointsOf(fi);
-            const int n = fp.size();
-            for (int i = 0; i < n; ++i) {
-                auto it = edgeToFaces.find(makeEdgeKey(fp[i], fp[(i + 1) % n]));
-                if (it == edgeToFaces.end()) continue;
-                for (int nb : it->second) dilated[static_cast<std::size_t>(nb)] = true;
-            }
-        }
+        // The reverted set: every failing face, and only those. Its healthy
+        // neighbours are NOT dropped with it -- the seam quads close a
+        // reverted face against a full-height neighbour exactly as they do
+        // for a gate removal. MEASURED: a one-ring dilation here dropped
+        // 46% of all faces on a hydrofoil window (20100 -> 10769 without
+        // it) and halved the drops on every layered benchmark, while the
+        // fluid volume moved TOWARD the layers-off reference
+        // (win_wfp_coarse_layers 27.07 -> 30.54, reference 30.77).
+        std::vector<bool> reverted(static_cast<std::size_t>(nTop));
+        for (int fi = 0; fi < nTop; ++fi) reverted[static_cast<std::size_t>(fi)] = !faceValid[static_cast<std::size_t>(fi)];
         // Gate removals: stacks condemned by an earlier pass are
         // reverted on EVERY step, so they never extrude at all -- same
         // code path (and therefore the same seam closure, the same
         // conformal terracing against full-height neighbours, and the
         // same "infeasible wall area" accounting) as a face the march
-        // drops on its own. Deliberately NOT one-ring dilated: a
-        // condemned stack's neighbours are removed only if they in turn
-        // produce a bad cell, which the next pass measures. (Rejected
-        // as needless machinery: additionally forbidding the terrace
-        // seams to extrude at all, and excluding condemned faces from
-        // being one-ring dilation SOURCES, changes nothing -- the
-        // ordinary drops that surround a removal are the
-        // front-terracing the existing clamps already absorb, not a
-        // seam artifact. What the seams DO need is a gate identity,
-        // see faceGateStack.)
+        // drops on its own: a condemned stack's neighbours are removed
+        // only if they in turn produce a bad cell, which the next pass
+        // measures. What the seams DO need is a gate identity, see
+        // faceGateStack.
         if (!gateRemoved.empty()) {
             for (int fi = 0; fi < nTop; ++fi) {
                 const int o = faceGateStack[static_cast<std::size_t>(fi)];
-                if (o >= 0 && gateRemoved.count({pOrd, o})) dilated[static_cast<std::size_t>(fi)] = true;
+                if (o >= 0 && gateRemoved.count({pOrd, o})) reverted[static_cast<std::size_t>(fi)] = true;
             }
         }
         for (int fi = 0; fi < nTop; ++fi) {
-            if (qualityBad[static_cast<std::size_t>(fi)]) dilated[static_cast<std::size_t>(fi)] = true;
+            if (qualityBad[static_cast<std::size_t>(fi)]) reverted[static_cast<std::size_t>(fi)] = true;
         }
         for (int fi = 0; fi < nTop; ++fi) {
-            if (!dilated[static_cast<std::size_t>(fi)]) continue;
+            if (!reverted[static_cast<std::size_t>(fi)]) continue;
             const int ownerHere = wallBucket.owner[static_cast<std::size_t>(fi)];
             if (ownerHere < nCoreCells && !coreReached[static_cast<std::size_t>(ownerHere)]) continue; // never ships
             ++stats.perStepDropped[static_cast<std::size_t>(step)];
@@ -2547,10 +2533,8 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             if (o >= 0 && droppedOrigins.insert(o).second) {
                 ++stats.droppedFaces;
                 int reason = dropReason[static_cast<std::size_t>(fi)];
-                if (reason == 0) {
-                    const int gs = faceGateStack[static_cast<std::size_t>(fi)];
-                    reason = gs >= 0 && gateRemoved.count({pOrd, gs}) ? kDropCondemned : kDropNeighbour;
-                }
+                const int gs = faceGateStack[static_cast<std::size_t>(fi)];
+                if (reason == 0 && gs >= 0 && gateRemoved.count({pOrd, gs})) reason = kDropCondemned;
                 if (stats.droppedByReason.empty()) stats.droppedByReason.assign(kNumLayerDropReasons, 0);
                 ++stats.droppedByReason[static_cast<std::size_t>(std::min(reason, kNumLayerDropReasons - 1))];
                 // Layer-feasibility accounting: a face that never completes ANY layer
@@ -2610,7 +2594,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 for (int p : fp0) loop0.push_back(out.points[static_cast<std::size_t>(p)]);
                 lqSeedNonPlanarity[fi] = loopNonPlanarity(loop0);
             }
-            if (dilated[static_cast<std::size_t>(fi)]) {
+            if (reverted[static_cast<std::size_t>(fi)]) {
                 newWallBucket.appendFrom(wallBucket, fi); // untouched revert
                 newFaceOrigin.push_back(faceOrigin[static_cast<std::size_t>(fi)]);
                 newFaceGateStack.push_back(faceGateStack[static_cast<std::size_t>(fi)]);
@@ -2730,7 +2714,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                         if (cand != fi) { otherFi = cand; break; }
                     }
                 }
-                const bool otherKept = otherFi != -1 && !dilated[static_cast<std::size_t>(otherFi)];
+                const bool otherKept = otherFi != -1 && !reverted[static_cast<std::size_t>(otherFi)];
                 if (otherKept && otherFi < fi) {
                     // Already emitted by the other (lower-index) prism
                     // when IT processed this edge -- just needs its
@@ -2781,7 +2765,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         // after each prism's own top-internal face; find them again by
         // owner+points signature (small counts per case, fine to scan).
         for (int fi = 0; fi < nTop; ++fi) {
-            if (dilated[static_cast<std::size_t>(fi)]) continue;
+            if (reverted[static_cast<std::size_t>(fi)]) continue;
             const IntSpan topPts = wallBucket.pointsOf(fi);
             const int n = topPts.size();
             for (int i = 0; i < n; ++i) {
@@ -2793,7 +2777,7 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 for (int cand : it->second) {
                     if (cand != fi) { otherFi = cand; break; }
                 }
-                if (otherFi == -1 || dilated[static_cast<std::size_t>(otherFi)] || otherFi >= fi) continue;
+                if (otherFi == -1 || reverted[static_cast<std::size_t>(otherFi)] || otherFi >= fi) continue;
                 // fi is the higher-index prism sharing this edge with
                 // otherFi (< fi), which already emitted the shared side
                 // face with neighbour left at -1 -- set it now.
