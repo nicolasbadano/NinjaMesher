@@ -611,7 +611,8 @@ NearestSolid nearestSolidOnSoup(const TriangleAabbBins& bins, const Vec3& p) {
 // `pointSolidId[i] >= 0` iff point i is a cut-edge intercept (its
 // producing STL ordinal), -1 for original grid points.
 int assignWallSolid(const std::vector<int>& loop, const std::vector<int>& pointSolidId,
-                     const std::vector<Vec3>& allPoints, const TriangleAabbBins* bins, int nStls) {
+                     const std::vector<Vec3>& allPoints, const TriangleAabbBins* bins, int nStls,
+                     const std::vector<TriangleAabbBins>& perStlBins) {
     // Single-STL shortcut: with one solid, BOTH branches
     // below can only ever answer 0 (the vote loop starts at best=0 and
     // never runs; the nearest-STL scan likewise). Skip the work.
@@ -632,6 +633,37 @@ int assignWallSolid(const std::vector<int>& loop, const std::vector<int>& pointS
         for (int s = 1; s < nStls; ++s) {
             if (votes[static_cast<std::size_t>(s)] > votes[static_cast<std::size_t>(best)]) {
                 best = s;
+            }
+        }
+        // A tied vote is a face straddling the junction of two offset
+        // surfaces (MEASURED, bm_layers_gate: a pier's offset face with two
+        // corners inside the radial gate's offset; the lowest-ordinal
+        // tie-break handed 354 of them to the gate, whose field then
+        // marched them sideways into folded prisms). The face goes to the
+        // tied STL it FACES: the one whose closest point from the face
+        // centre lies most nearly along the face's outward normal, which is
+        // the direction the march will extrude it.
+        int nTied = 0;
+        for (int s = 0; s < nStls; ++s) {
+            if (votes[static_cast<std::size_t>(s)] == votes[static_cast<std::size_t>(best)]) ++nTied;
+        }
+        if (nTied > 1 && !perStlBins.empty()) {
+            auto unit = [](const Vec3& v) {
+                const double m = norm(v);
+                return m > 0.0 ? v * (1.0 / m) : Vec3{0, 0, 0};
+            };
+            const Vec3 n = unit(loopAreaVector(loop, allPoints));
+            const Vec3 c = loopAreaCentroid(loop, allPoints);
+            double bestAlign = -std::numeric_limits<double>::max();
+            for (int s = 0; s < nStls; ++s) {
+                if (votes[static_cast<std::size_t>(s)] != votes[static_cast<std::size_t>(best)]) continue;
+                const ClosestHit hit = closestPointOnSoup(perStlBins[static_cast<std::size_t>(s)], c);
+                if (hit.triangle < 0) continue;
+                const double align = dot(n, unit(hit.point - c));
+                if (align > bestAlign) {
+                    bestAlign = align;
+                    best = s;
+                }
             }
         }
         return best;
@@ -689,6 +721,16 @@ GeneratedMesh cutMesh(const GeneratedMesh& base, const CutData& cd,
         wallBins = buildTriangleAabbBins(tris);
     }
     const TriangleAabbBins* wallBinsPtr = haveWallBins ? &wallBins : nullptr;
+    // Per-STL indices for assignWallSolid's tie-break (multi-STL only).
+    std::vector<std::vector<Triangle>> perStlWallTris;
+    std::vector<TriangleAabbBins> perStlWallBins;
+    if (haveWallBins) {
+        perStlWallTris.resize(static_cast<std::size_t>(nStls));
+        for (const Triangle& tri : tris) {
+            if (tri.solidId >= 0 && tri.solidId < nStls) perStlWallTris[static_cast<std::size_t>(tri.solidId)].push_back(tri);
+        }
+        for (const std::vector<Triangle>& st : perStlWallTris) perStlWallBins.push_back(buildTriangleAabbBins(st));
+    }
 
     // --- Point registry: base grid points + one entry per cut edge, in
     // deterministic (sorted-key) order (exact-match dedup only).
@@ -1554,7 +1596,7 @@ GeneratedMesh cutMesh(const GeneratedMesh& base, const CutData& cd,
                 }
                 const int keptOld = ownerKept ? faceOwnerOld : faceNeighbourOld;
                 std::vector<int> loop = orientedFor(geomOwnerOriented, faceOwnerOld, keptOld);
-                const int sid = assignWallSolid(loop, pointSolidId, allPoints, wallBinsPtr, nStls);
+                const int sid = assignWallSolid(loop, pointSolidId, allPoints, wallBinsPtr, nStls, perStlWallBins);
                 wallFacesByStl[static_cast<std::size_t>(sid)].append(
                     loop, newCellIndex[static_cast<std::size_t>(keptOld)], -1,
                     static_cast<int>(base.patches.size()) + sid);
@@ -1572,7 +1614,7 @@ GeneratedMesh cutMesh(const GeneratedMesh& base, const CutData& cd,
     for (int c = 0; c < nCells; ++c) {
         const RawCellData& rc = raw[static_cast<std::size_t>(c)];
         if (rc.status == CellStatus::Kept && rc.isCut) {
-            const int sid = assignWallSolid(rc.cutFaceLoop, pointSolidId, allPoints, wallBinsPtr, nStls);
+            const int sid = assignWallSolid(rc.cutFaceLoop, pointSolidId, allPoints, wallBinsPtr, nStls, perStlWallBins);
             wallFacesByStl[static_cast<std::size_t>(sid)].append(
                 rc.cutFaceLoop, newCellIndex[static_cast<std::size_t>(c)], -1,
                 static_cast<int>(base.patches.size()) + sid);
