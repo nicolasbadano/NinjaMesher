@@ -1127,6 +1127,52 @@ GeneratedMesh cutMesh(const GeneratedMesh& base, const CutData& cd,
             loopPts = dedupLoop(std::move(loopPts), allPoints);
             chordTopologyOk = loopPts.size() >= 3;
         }
+        // Conformance splice of the cut face, the rule the grid faces
+        // already follow: a cut-face edge that runs along a grid line
+        // (axis-aligned -- the chord between two ON corners of one face)
+        // takes every point of this cell's other loops lying strictly
+        // inside it, in order. MEASURED (hydrofoil leading edge, level 7/6 boundary):
+        // a coarse cell whose split side face carries a hanging node on
+        // the edge between two ON corners emitted the chord without it,
+        // failed cellFaceSetIsClosed, and was removed -- a one-cell notch
+        // whose riser faces no layer can climb.
+        if (chordTopologyOk) {
+            std::vector<int> cand;
+            for (const std::vector<int>& lp : ownFaceLoops) cand.insert(cand.end(), lp.begin(), lp.end());
+            std::sort(cand.begin(), cand.end());
+            cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+            std::vector<int> spliced;
+            const std::size_t ln = loopPts.size();
+            for (std::size_t i = 0; i < ln; ++i) {
+                const int a = loopPts[i];
+                const int b = loopPts[(i + 1) % ln];
+                spliced.push_back(a);
+                const Vec3& A = allPoints[static_cast<std::size_t>(a)];
+                const Vec3& B = allPoints[static_cast<std::size_t>(b)];
+                const double ca[3] = {A.x, A.y, A.z}, cb[3] = {B.x, B.y, B.z};
+                int axis = -1, nSame = 0;
+                for (int k = 0; k < 3; ++k) {
+                    if (ca[k] == cb[k]) ++nSame; else axis = k;
+                }
+                if (nSame != 2) continue;
+                std::vector<std::pair<double, int>> inside;
+                for (int q : cand) {
+                    if (q == a || q == b) continue;
+                    const Vec3& Q = allPoints[static_cast<std::size_t>(q)];
+                    const double cq[3] = {Q.x, Q.y, Q.z};
+                    bool onLine = true;
+                    for (int k = 0; k < 3; ++k) {
+                        if (k != axis && cq[k] != ca[k]) onLine = false;
+                    }
+                    if (!onLine) continue;
+                    const double tq = (cq[axis] - ca[axis]) / (cb[axis] - ca[axis]);
+                    if (tq > 0.0 && tq < 1.0) inside.emplace_back(tq, q);
+                }
+                std::sort(inside.begin(), inside.end());
+                for (const auto& [tq, q] : inside) spliced.push_back(q);
+            }
+            loopPts = std::move(spliced);
+        }
 
         if (!chordTopologyOk) {
             // MEASURED bug fix (found via direct mesh
