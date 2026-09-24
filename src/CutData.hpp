@@ -45,6 +45,10 @@ struct GeometryConfig {
     bool present = false;
     std::vector<StlEntry> stls; // declaration order == output patch order
     Vec3 locationInMesh;
+    // `refinementGeometry`: STLs read ONLY by `type surface` refinement
+    // rules -- never cut against, never a patch, never layered
+    // (`patchName` unused).
+    std::vector<StlEntry> sizing;
 };
 
 // Hash for a sorted pair of point indices (edge key).

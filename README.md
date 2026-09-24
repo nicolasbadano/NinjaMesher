@@ -124,6 +124,11 @@ geometry                 // STL surfaces to cut against (paths relative to caseD
     body.stl { name body; }   // becomes the wall patch name
 }
 
+refinementGeometry       // optional: STLs that only SIZE the grid -- never cut,
+{                        // never a patch, never layered
+    fin.stl { }          // e.g. the pieces of a wall to refine at different levels
+}
+
 locationInMesh (0.5 0.5 0.5);   // a point inside the fluid region
 
 refinement               // zero or more named rules
@@ -132,6 +137,7 @@ refinement               // zero or more named rules
     nearBody  { type surface; stl body.stl; distance 0.1; level 2; }
     box1      { type box;    min (0 0 0); max (1 1 1); level 1; }
     ball      { type sphere; centre (0 0 0); radius 0.5; level 1; }
+    // `stl` may name a `geometry` or a `refinementGeometry` surface.
     // Several rules may name the SAME stl, which is how you grade bands
     // outward; a cell takes the DEEPEST level of every rule containing
     // it, so levels only ever go up and rule order does not matter.

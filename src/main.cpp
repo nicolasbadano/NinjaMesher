@@ -133,7 +133,8 @@ ninja::MeshConfig buildMeshConfig(const ninja::DictEntry& root) {
     // Warn on unknown top-level keys.
     for (const auto& [key, value] : root.dict) {
         if (key != "domain" && key != "patches" && key != "FoamFile" && key != "geometry" &&
-            key != "locationInMesh" && key != "refinement" && key != "layers" && key != "layersDebug") {
+            key != "locationInMesh" && key != "refinement" && key != "layers" && key != "layersDebug" &&
+            key != "refinementGeometry") {
             std::cerr << "warning: unknown top-level key '" << key << "' ignored\n";
         }
     }
@@ -185,20 +186,16 @@ std::vector<ninja::RefineRegion> buildRefineRegions(const ninja::DictEntry& root
         } else if (r.type == "surface") {
             r.stlKey = ninja::requireScalar(entry, "stl");
             r.distance = std::stod(ninja::requireScalar(entry, "distance"));
-            if (!geom.present) {
-                throw std::runtime_error("Dict error: refinement region '" + name +
-                                          "' has type 'surface' but no 'geometry' block is present");
-            }
             bool found = false;
-            for (const ninja::StlEntry& se : geom.stls) {
-                if (se.rawFile == r.stlKey) {
-                    found = true;
-                    break;
+            for (const std::vector<ninja::StlEntry>* list : {&geom.stls, &geom.sizing}) {
+                for (const ninja::StlEntry& se : *list) {
+                    if (se.rawFile == r.stlKey) found = true;
                 }
             }
             if (!found) {
                 throw std::runtime_error("Dict error: refinement region '" + name + "' references stl '" +
-                                          r.stlKey + "' which is not declared in 'geometry'");
+                                          r.stlKey + "' which is declared in neither 'geometry' nor"
+                                          " 'refinementGeometry'");
             }
         } else {
             throw std::runtime_error("Dict error: refinement region '" + name + "' has unknown type '" +
@@ -217,6 +214,25 @@ std::vector<ninja::RefineRegion> buildRefineRegions(const ninja::DictEntry& root
 // NOT be iterated for patch ordering).
 ninja::GeometryConfig buildGeometryConfig(const ninja::DictEntry& root, const std::string& caseDir) {
     ninja::GeometryConfig gc;
+    // refinementGeometry { <file.stl> { } ... }: surfaces that only size
+    // the grid (`type surface` refinement rules). A file may not be both
+    // a wall and a sizing surface -- one role per STL keeps "which
+    // surfaces bound the fluid" answerable from the geometry block alone.
+    if (auto sz = root.dict.find("refinementGeometry"); sz != root.dict.end()) {
+        if (sz->second.kind != ninja::DictEntry::Kind::Dict) {
+            throw std::runtime_error("Dict error: 'refinementGeometry' must be a sub-dict");
+        }
+        for (const std::string& stlFile : sz->second.order) {
+            if (sz->second.dict.at(stlFile).kind != ninja::DictEntry::Kind::Dict) {
+                throw std::runtime_error("Dict error: refinementGeometry entry '" + stlFile +
+                                          "' must be a sub-dict (e.g. '" + stlFile + " { }')");
+            }
+            ninja::StlEntry se;
+            se.stlPath = (std::filesystem::path(caseDir) / stlFile).string();
+            se.rawFile = stlFile;
+            gc.sizing.push_back(std::move(se));
+        }
+    }
     auto it = root.dict.find("geometry");
     if (it == root.dict.end()) {
         return gc;
@@ -233,6 +249,12 @@ ninja::GeometryConfig buildGeometryConfig(const ninja::DictEntry& root, const st
         const ninja::DictEntry& stlEntry = geomDict.dict.at(stlFile);
         if (stlEntry.kind != ninja::DictEntry::Kind::Dict) {
             throw std::runtime_error("Dict error: geometry entry '" + stlFile + "' must be a sub-dict");
+        }
+        for (const ninja::StlEntry& sz : gc.sizing) {
+            if (sz.rawFile == stlFile) {
+                throw std::runtime_error("Dict error: '" + stlFile +
+                                          "' is declared in both 'geometry' and 'refinementGeometry'");
+            }
         }
         ninja::StlEntry se;
         se.stlPath = (std::filesystem::path(caseDir) / stlFile).string();
@@ -410,6 +432,13 @@ LayersConfig buildLayersConfig(const ninja::DictEntry& root, const ninja::Geomet
             }
         }
         if (!declared) {
+            for (const ninja::StlEntry& se : geom.sizing) {
+                if (se.rawFile == key) {
+                    throw std::runtime_error("Dict error: 'layers' entry '" + key +
+                                              "' is a 'refinementGeometry' surface; layers grow only on"
+                                              " 'geometry' walls");
+                }
+            }
             throw std::runtime_error("Dict error: 'layers' entry '" + key +
                                       "' references an stl not declared in 'geometry'");
         }
@@ -549,6 +578,9 @@ std::vector<ninja::Triangle> readCombinedStls(const ninja::GeometryConfig& gc) {
 std::unordered_map<std::string, std::vector<ninja::Triangle>> readStlsByRawFile(const ninja::GeometryConfig& gc) {
     std::unordered_map<std::string, std::vector<ninja::Triangle>> out;
     for (const ninja::StlEntry& se : gc.stls) {
+        out[se.rawFile] = ninja::readStl(se.stlPath);
+    }
+    for (const ninja::StlEntry& se : gc.sizing) {
         out[se.rawFile] = ninja::readStl(se.stlPath);
     }
     return out;
@@ -1036,8 +1068,7 @@ PipelineResult runPipeline(const ninja::MeshConfig& cfg, const std::vector<ninja
     // block-local cut-entity (point/edge) enumeration. R=1 and no
     // marking work when `regions` is empty -- one code path for all N
     // and for both the refined and unrefined pipelines.
-    std::unordered_map<std::string, std::vector<ninja::Triangle>> stlTriangles =
-        geom.present ? readStlsByRawFile(geom) : std::unordered_map<std::string, std::vector<ninja::Triangle>>{};
+    std::unordered_map<std::string, std::vector<ninja::Triangle>> stlTriangles = readStlsByRawFile(geom);
     ninja::LocalRefine lr = ninja::refineLocal(cfg, regions, stlTriangles, geom.present);
     // Peak-RSS lifecycle rule: free consumed inputs at the
     // last-consumer boundary instead of end of pipeline.

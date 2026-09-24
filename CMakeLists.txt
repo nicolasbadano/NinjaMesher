@@ -357,6 +357,12 @@ add_test(NAME dict_dupkey
                  ${CMAKE_CURRENT_SOURCE_DIR}/Tests/cases/dict_dupkey)
 set_tests_properties(dict_dupkey PROPERTIES TIMEOUT 300)
 
+add_test(NAME refine_geometry
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_refinegeometry.sh
+                 $<TARGET_FILE:ninjaMesher>
+                 ${CMAKE_CURRENT_SOURCE_DIR}/Tests/cases/refine_geometry)
+set_tests_properties(refine_geometry PROPERTIES TIMEOUT 300)
+
 add_test(NAME np_invariance
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_npinvariance.sh
                  $<TARGET_FILE:ninjaMesher>
