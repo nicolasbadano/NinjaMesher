@@ -3387,6 +3387,77 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
 
 } // namespace
 
+long reattributeSteepWallFaces(GeneratedMesh& mesh, const std::vector<LayerStlSpec>& specs,
+                               const std::vector<TriangleAabbBins>& perStlBins) {
+    if (specs.size() < 2) return 0;
+    std::unordered_map<std::string, int> ordOf;
+    for (std::size_t p = 0; p < mesh.patches.size(); ++p) ordOf[mesh.patches[p].name] = static_cast<int>(p);
+    std::vector<int> specOfPatch(mesh.patches.size(), -1);
+    for (std::size_t k = 0; k < specs.size(); ++k) specOfPatch[static_cast<std::size_t>(ordOf.at(specs[k].wallPatchName))] = static_cast<int>(k);
+    // Cosine of the face normal with the direction to STL k's closest point,
+    // and the face centre's offset error |d_k - t_k| / t_k.
+    auto facing = [&](const Vec3& n, const Vec3& c, std::size_t k, double& relErr) {
+        const ClosestHit h = closestPointOnSoup(perStlBins[static_cast<std::size_t>(specs[k].stlIndex)], c);
+        const double tk = specs[k].localThickness ? specs[k].localThickness(c) : specs[k].thickness;
+        relErr = std::fabs(std::sqrt(h.distSq) - tk) / tk;
+        return dot(n, normalizeOrZero(h.point - c));
+    };
+    const int nB = mesh.nFaces() - mesh.nInternalFaces;
+    std::vector<int> newPatch(static_cast<std::size_t>(nB), -1);
+    for (std::size_t p = 0; p < mesh.patches.size(); ++p)
+        for (int f = mesh.patches[p].startFace; f < mesh.patches[p].startFace + mesh.patches[p].nFaces; ++f)
+            newPatch[static_cast<std::size_t>(f - mesh.nInternalFaces)] = static_cast<int>(p);
+    long moved = 0;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256) reduction(+ : moved)
+#endif
+    for (int b = 0; b < nB; ++b) {
+        const int f = mesh.nInternalFaces + b;
+        const int p = newPatch[static_cast<std::size_t>(b)];
+        if (p < 0) continue;
+        const int own = specOfPatch[static_cast<std::size_t>(p)];
+        if (own < 0) continue;
+        std::vector<Vec3> loop;
+        for (int q : mesh.faces.pointsOf(f)) loop.push_back(mesh.points[static_cast<std::size_t>(q)]);
+        const Vec3 n = normalizeOrZero(newellNormal(loop));
+        const Vec3 c = loopCentroid(loop);
+        double err;
+        const double cosOwn = facing(n, c, static_cast<std::size_t>(own), err);
+        if (cosOwn >= 0.5) continue;
+        double bestCos = std::max(cosOwn, 0.8);
+        int best = -1;
+        for (std::size_t k = 0; k < specs.size(); ++k) {
+            if (static_cast<int>(k) == own) continue;
+            const double ck = facing(n, c, k, err);
+            if (err <= 0.5 && ck > bestCos) {
+                bestCos = ck;
+                best = ordOf.at(specs[k].wallPatchName);
+            }
+        }
+        if (best >= 0) {
+            newPatch[static_cast<std::size_t>(b)] = best;
+            ++moved;
+        }
+    }
+    if (moved == 0) return 0;
+    // Regroup the boundary faces by patch, each patch keeping its face order.
+    FaceStore ns;
+    for (int f = 0; f < mesh.nInternalFaces; ++f) ns.appendFrom(mesh.faces, f);
+    for (std::size_t p = 0; p < mesh.patches.size(); ++p) {
+        mesh.patches[p].startFace = ns.size();
+        for (int b = 0; b < nB; ++b) {
+            if (newPatch[static_cast<std::size_t>(b)] != static_cast<int>(p)) continue;
+            const int f = mesh.nInternalFaces + b;
+            const IntSpan fp = mesh.faces.pointsOf(f);
+            ns.append(fp.b, fp.size(), mesh.faces.owner[static_cast<std::size_t>(f)], -1, static_cast<int>(p));
+        }
+        mesh.patches[p].nFaces = ns.size() - mesh.patches[p].startFace;
+    }
+    mesh.faces = std::move(ns);
+    buildCellFaces(mesh, mesh.nCells());
+    return moved;
+}
+
 LayersResult applyLayers(const GeneratedMesh& cutMeshIn, const std::vector<int>& cellLevelIn,
                           const std::vector<int>& pointLevelIn, const MeshConfig& cfg,
                           const std::vector<LayerStlSpec>& specs,

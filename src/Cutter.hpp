@@ -80,6 +80,7 @@ struct CutStats {
     long surfaceClampedSteps = 0;     // see LayerStats
     long buriedLandingFaces = 0;      // see LayerStats
     long mergedLayerFaces = 0;        // see LayerStats
+    long reattributedWallFaces = 0;   // see reattributeSteepWallFaces
     double buriedLandingArea = 0.0;
     double buriedLandingMaxDepth = 0.0;
     double buriedLandingMaxDepthOverH = 0.0;

@@ -315,6 +315,20 @@ struct LayersResult {
 // the field via `classifyVertices` (the batched sign source, see
 // Geometry.hpp); unused when smoothing is off, so callers pass the
 // same locationInMesh they already have (`GeometryConfig::locationInMesh`).
+// Re-homes the layered wall faces that face away from their own STL. With
+// several layered STLs, a face at their junction can lie on STL B's offset
+// surface and face B while the cut assigned it to A; A's field then marches
+// it parallel to itself and the stack folds (bottomFolded). A face whose
+// normal is more than 60 deg off the direction to its own STL's closest point
+// moves to the layered STL whose offset surface it lies on (|d - t| <= t/2)
+// and which it faces best, with a cosine above 0.8. Returns the number of
+// faces moved; the mesh is untouched when it is 0 (always, for a single
+// layered STL).
+// MEASURED (bm_layers_gate): drops 101 -> 46, missing-layer area
+// 5.37 -> 0.80 m2.
+long reattributeSteepWallFaces(GeneratedMesh& mesh, const std::vector<LayerStlSpec>& specs,
+                               const std::vector<TriangleAabbBins>& perStlBins);
+
 LayersResult applyLayers(const GeneratedMesh& cutMeshIn, const std::vector<int>& cellLevelIn,
                           const std::vector<int>& pointLevelIn, const MeshConfig& cfg,
                           const std::vector<LayerStlSpec>& specs,

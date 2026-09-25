@@ -811,6 +811,7 @@ void runLayersStage(ninja::GeneratedMesh& mesh, std::vector<int>& cellLevel, std
     if (specs.empty()) {
         return;
     }
+    stats.reattributedWallFaces = ninja::reattributeSteepWallFaces(mesh, specs, perStlBins);
     ninja::LayersResult lr = ninja::applyLayers(mesh, cellLevel, pointLevel, cfg, specs, perStlTris, perStlBins,
                                                  layers.debugForceDropSpheres, geom.locationInMesh);
     mesh = std::move(lr.mesh);
@@ -1778,6 +1779,7 @@ int main(int argc, char** argv) {
                 std::cout << "qualityDroppedFaces = " << res.cutStats.qualityDroppedFaces << "\n";
                 std::cout << "surfaceClampedSteps = " << res.cutStats.surfaceClampedSteps << "\n";
                 std::cout << "mergedLayerFaces = " << res.cutStats.mergedLayerFaces << "\n";
+                std::cout << "reattributedWallFaces = " << res.cutStats.reattributedWallFaces << "\n";
                 std::cout << "buriedLandingFaces = " << res.cutStats.buriedLandingFaces << "\n";
                 std::cout << "buriedLandingArea = " << res.cutStats.buriedLandingArea << "\n";
                 std::cout << "buriedLandingMaxDepth = " << res.cutStats.buriedLandingMaxDepth << " ("
