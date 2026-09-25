@@ -251,7 +251,11 @@ cannot be made validly, the pass declines and leaves the cell alone.
    gap edge and are measurably wrong. A fan is accepted only if the
    owner cell, re-centred by the split, still passes the per-face
    geometry tests and every fan triangle stays under checkMesh's
-   boundary skewness; otherwise the face ships warped but valid.
+   boundary skewness; otherwise the face ships warped but valid. Among
+   the accepted fans, one whose every triangle faces the cell centre
+   within 70° wins: on a thin cut cell the far corner triangle sits
+   beside the centre, and its first layer makes it a severely
+   non-orthogonal internal face.
 
 ### 3.5 The march
 
@@ -378,7 +382,7 @@ every thread of a rank to one core and forfeits the speedup entirely.
 | Bounded volume jump | 2:1 octree grading | `--refine-stats` `maxAdjacentLevelDiff == 1` |
 | No cell worse than checkMesh's own thresholds | checkMesh's per-face geometry tests transcribed from `primitiveMeshTools` and run *as a post-condition* — not paraphrased | Cut post-condition, merge refusal, and in-march prism validation |
 | No prism above the aspect-ratio ceiling | checkMesh's `cellClosedness` aspect metric vs its own default of 1000 | In-march validation; failing stack condemned, wall stays at the offset cut |
-| No prism face severely non-orthogonal | Angle between a prism face's normal and the line of centres vs checkMesh's own 70° — exact on the face to the cell above, one-sided on side faces whose neighbour is not decided yet | In-march validation. Measured on three windows: 148, 17 and 7 faces above 70° (worst 82.9°) → none, for 0.3 % fewer prisms |
+| No prism face severely non-orthogonal | Angle between a prism face's normal and the line of centres vs checkMesh's own 70° — exact on the face to the cell above and on side faces shared with the neighbouring prism, one-sided on rim and seam faces | In-march validation. Measured on three windows: 148, 17 and 7 faces above 70° (worst 82.9°) → none, for 0.3 % fewer prisms |
 | No wall face deep inside the solid | Seal guard: a landing is emitted inside the solid only up to 0.25·h, on the side it approached | Buried area and depth, and refused area, reported per case |
 | Partition invariance | Exact integer keys; pure-function values; identical serial tail | `np_invariance`, byte-compare at np = 1/2/4 |
 
@@ -502,12 +506,12 @@ That was tested by sweeping four real-CAD cases over grid factors ×2,
 meshes clear checkMesh's whitelist — at dx 0.96 m on a case designed
 at 0.12 m. What degrades is what should: layers retreat from the wall
 loudly (`infeasibleWallArea`, summed over the four cases and counted on
-the fluid that is written: 1.3 % → 22.8 % → 23.3 % of the wall as the
-grid coarsens ×2 → ×4 → ×8; 4.5 % → 30.3 % → 36.0 % in 0.2.0), the seal
-guard refuses more landings, non-orthogonality stays under 70° at ×4 and
-×8 because the march refuses the prisms that would breach it (at ×2 two
-cases carry faces to 72.2°, as in 0.2.0; checkMesh warns, it does not
-fail), and the outer
+the fluid that is written: 0.8 % → 21.8 % → 19.8 % of the wall as the
+grid coarsens ×2 → ×4 → ×8; 1.3 % → 22.8 % → 23.3 % in 0.3.0 and
+4.5 % → 30.3 % → 36.0 % in 0.2.0), the seal guard refuses more landings,
+non-orthogonality stays under 70° at ×4 and ×8 because the march refuses
+the prisms that would breach it (at ×2 two cases carry faces to 71.6°,
+72.2° in 0.2.0 and 0.3.0; checkMesh warns, it does not fail), and the outer
 quality gate stops converging — while the mesh stays valid, because the
 in-march guard reverts a failing prism *before* emission. Non-convergence
 costs layer coverage, not validity.
