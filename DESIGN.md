@@ -514,9 +514,9 @@ That was tested by sweeping four real-CAD cases over grid factors ×2,
 meshes clear checkMesh's whitelist — at dx 0.96 m on a case designed
 at 0.12 m. What degrades is what should: layers retreat from the wall
 loudly (`infeasibleWallArea`, summed over the four cases and counted on
-the fluid that is written: 0.8 % → 21.8 % → 19.8 % of the wall as the
-grid coarsens ×2 → ×4 → ×8; 1.3 % → 22.8 % → 23.3 % in 0.3.0 and
-4.5 % → 30.3 % → 36.0 % in 0.2.0), the seal guard refuses more landings,
+the fluid that is written: 0.7 % → 21.3 % → 19.1 % of the wall as the
+grid coarsens ×2 → ×4 → ×8; 0.8 % → 21.8 % → 19.8 % in 0.4.0,
+1.3 % → 22.8 % → 23.3 % in 0.3.0 and 4.5 % → 30.3 % → 36.0 % in 0.2.0), the seal guard refuses more landings,
 non-orthogonality stays under 70° at ×4 and ×8 because the march refuses
 the prisms that would breach it (at ×2 two cases carry faces to 71.6°,
 72.2° in 0.2.0 and 0.3.0; checkMesh warns, it does not fail), and the outer
