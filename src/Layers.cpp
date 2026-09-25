@@ -2655,9 +2655,10 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         // helps (the prism centre stays behind part of the face), while the
         // merged cell passed every check for 172 of 177 on bm_layers_wfp.
         // The merged cell is held to the same tests as any prism: tets and
-        // skewness on all its faces (sides one-sided, the stricter form),
-        // the interface above two-sided, non-orthogonality against the
-        // FINAL neighbours -- iterated, since a neighbour may merge too.
+        // skewness on all its faces, the interface above two-sided, and the
+        // side faces shared with a neighbour two-sided (skewness and
+        // non-orthogonality) against the FINAL neighbours -- iterated, since
+        // a neighbour may merge too.
         std::vector<int> mergeInto(static_cast<std::size_t>(nTop), -1);
         std::vector<Vec3> mergedCentroid(static_cast<std::size_t>(nTop));
         {
@@ -2731,8 +2732,14 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 }
                 return prismValid(mid, bot, 0.0, minVolEps * fs * fs * fs);
             };
-            // Non-orthogonality of the side faces shared with a neighbour, against
-            // the neighbour's final centre (merged, newly built, or unchanged).
+            // The side faces shared with a neighbour, against the neighbour's
+            // final centre (merged, newly built, or unchanged). One-sided
+            // skewness does not bound the two-sided one. MEASURED
+            // (bm_layers_wfp at grid x8): a merged cell's side passed
+            // one-sided and shipped at skewness 4.07 against its neighbour.
+            const auto sideBad = [&](const std::vector<Vec3>& loop, const Vec3& c, const Vec3* nc) {
+                return nc && (faceNonOrthDegOf(loop, c, nc) > kNonOrthMaxDeg || faceSkewnessOf(loop, c, nc) > kSkewMax);
+            };
             const auto sidesOk = [&](int fi, const MergedCell& mc, const Vec3& c) {
                 const IntSpan M = wallBucket.pointsOf(fi);
                 const int n = M.size();
@@ -2747,13 +2754,13 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                         // Upper side: shared with the neighbouring prism of the step above.
                         if (nbrCell != owner) {
                             const Vec3* nc = gMerged ? &mergedCentroid[static_cast<std::size_t>(g)] : lqOwnerCentroidOf(nbrCell);
-                            if (nc && faceNonOrthDegOf(mc.loops[static_cast<std::size_t>(2 + 2 * i)], c, nc) > kNonOrthMaxDeg) return false;
+                            if (sideBad(mc.loops[static_cast<std::size_t>(2 + 2 * i)], c, nc)) return false;
                         }
                         // Lower side: shared with whatever g becomes this step.
                         const Vec3* lc = gMerged ? &mergedCentroid[static_cast<std::size_t>(g)]
                                          : !reverted[static_cast<std::size_t>(g)] ? &faceQuality[static_cast<std::size_t>(g)].centroid
                                                                                   : nullptr;
-                        if (lc && faceNonOrthDegOf(mc.loops[static_cast<std::size_t>(3 + 2 * i)], c, lc) > kNonOrthMaxDeg) return false;
+                        if (sideBad(mc.loops[static_cast<std::size_t>(3 + 2 * i)], c, lc)) return false;
                     }
                 }
                 return true;
