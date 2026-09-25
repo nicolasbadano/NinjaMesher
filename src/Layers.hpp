@@ -217,6 +217,9 @@ struct LayerStats {
     double buriedLandingArea = 0.0;
     double buriedLandingMaxDepth = 0.0;
     double buriedLandingMaxDepthOverH = 0.0;
+    // Failed prisms merged into the prism above instead of reverted (the
+    // stack keeps one layer fewer but still reaches the wall).
+    long mergedLayerFaces = 0;
 
     // Collapsed-prism guard (achieved vs REQUESTED layer height).
     // Landed prisms the march refused because their ACHIEVED mean

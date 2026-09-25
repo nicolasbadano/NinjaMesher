@@ -285,7 +285,15 @@ wall. Thicknesses are geometric, thinnest at the wall:
 Two cross-step behaviours are deliberate and are what "graceful
 degradation" actually means here:
 
-- A face whose prism fails validation at step *k* **reverts to a plain
+- A prism that fails below the first layer is first **merged into the
+  prism above it**: that cell grows down to the new bottom and the
+  interface between them is not emitted. The stack keeps one layer
+  fewer but still reaches the wall. The typical failure is a thin wall
+  layer under an interface whose warp is about its own height, which no
+  triangulation of that face can fix — the prism's centre stays behind
+  part of it. The merged cell is held to every test a prism is, against
+  its neighbours' final centres; reported as `mergedLayerFaces`.
+- Otherwise a face whose prism fails validation at step *k* **reverts to a plain
   wall face** and rejoins the wall bucket, so step *k+1* re-marches it
   with the distance it has left. The result is locally *fewer, thicker*
   layers — not a hole.

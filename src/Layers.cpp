@@ -1239,6 +1239,12 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
         std::vector<int> faceGateStack = faceOrigin;
         std::unordered_map<int, int> pointOrigin; // point index -> origin id
         std::set<int> droppedOrigins;
+        // Every layer prism by cell: the loops it was built between and the
+        // cell it grew from -- what a prism merged into it (see mergeInto)
+        // needs. A prism absorbs at most one failed prism below it.
+        std::unordered_map<int, std::vector<int>> prismTopOf, prismBottomOf;
+        std::unordered_map<int, int> prismParentOf;
+        std::unordered_set<int> mergedPrisms;
         std::set<int> frozenOrigins;
         // Quality instrumentation: origin id -> wall seed-face non-planarity,
         // captured once at step 0 (where wallBucket IS the original
@@ -2639,6 +2645,166 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 }
             }
         }
+        // --- A prism that fails below the first layer is merged into the
+        // prism above it instead of being reverted: that cell grows down to
+        // the new bottom and the interface between the two, the face whose
+        // warp the thin prism could not carry, is not emitted. The stack
+        // keeps one layer fewer but still reaches the wall. MEASURED: the
+        // wall-layer prisms refused on their top face's tets sit under an
+        // interface warped by 0.6-1.1x their own height; no triangulation
+        // helps (the prism centre stays behind part of the face), while the
+        // merged cell passed every check for 172 of 177 on bm_layers_wfp.
+        // The merged cell is held to the same tests as any prism: tets and
+        // skewness on all its faces (sides one-sided, the stricter form),
+        // the interface above two-sided, non-orthogonality against the
+        // FINAL neighbours -- iterated, since a neighbour may merge too.
+        std::vector<int> mergeInto(static_cast<std::size_t>(nTop), -1);
+        std::vector<Vec3> mergedCentroid(static_cast<std::size_t>(nTop));
+        {
+            const auto P = [&](int p) -> const Vec3& { return out.points[static_cast<std::size_t>(p)]; };
+            const auto botOf = [&](int p) { return bottomPointIdx[static_cast<std::size_t>(frontIdx.at(p))]; };
+            // Upper side i spans T -> M, lower side i spans M -> bottom.
+            struct MergedCell {
+                std::vector<Vec3> top;                     // parent's top loop, stored orientation
+                std::vector<std::vector<Vec3>> loops;      // outward: top reversed, bottom, then upper/lower per side
+            };
+            const auto buildMerged = [&](int fi, const std::vector<int>& T) {
+                MergedCell mc;
+                const IntSpan M = wallBucket.pointsOf(fi);
+                const std::size_t n = T.size();
+                for (int p : T) mc.top.push_back(P(p));
+                mc.loops.push_back(std::vector<Vec3>(mc.top.rbegin(), mc.top.rend()));
+                std::vector<Vec3> bot;
+                for (int p : M) bot.push_back(P(botOf(p)));
+                mc.loops.push_back(bot);
+                for (std::size_t i = 0; i < n; ++i) {
+                    const std::size_t j = (i + 1) % n;
+                    mc.loops.push_back({P(T[i]), P(T[j]), P(M[j]), P(M[i])});
+                    mc.loops.push_back({P(M[i]), P(M[j]), P(botOf(M[j])), P(botOf(M[i]))});
+                }
+                return mc;
+            };
+            const auto eligible = [&](int fi) -> const std::vector<int>* {
+                const int r = dropReason[static_cast<std::size_t>(fi)];
+                if (r == 0 || r == kDropHeldSeam || r == kDropSealed || r == kDropForced) return nullptr;
+                const int gs = faceGateStack[static_cast<std::size_t>(fi)];
+                if (gs >= 0 && gateRemoved.count({pOrd, gs})) return nullptr;
+                const int owner = wallBucket.owner[static_cast<std::size_t>(fi)];
+                if (mergedPrisms.count(owner)) return nullptr;
+                const auto itT = prismTopOf.find(owner);
+                const auto itB = prismBottomOf.find(owner);
+                if (itT == prismTopOf.end() || itB == prismBottomOf.end()) return nullptr;
+                const IntSpan M = wallBucket.pointsOf(fi);
+                // fi must be that prism's own bottom face, not a seam it owns.
+                if (itB->second.size() != static_cast<std::size_t>(M.size()) ||
+                    !std::equal(itB->second.begin(), itB->second.end(), M.b)) {
+                    return nullptr;
+                }
+                return &itT->second;
+            };
+            // The checks that do not depend on the neighbours' decisions.
+            const auto ownChecks = [&](int fi, const MergedCell& mc, const Vec3& c) {
+                LayerCellQuality r;
+                const int owner = wallBucket.owner[static_cast<std::size_t>(fi)];
+                const auto par = prismParentOf.find(owner);
+                const Vec3* parentC = par != prismParentOf.end() ? lqOwnerCentroidOf(par->second) : nullptr;
+                if (!parentC) return false;
+                if (evalFaceAgainstApex(mc.loops[0], c, r) || evalFaceAgainstApex(mc.top, *parentC, r) ||
+                    !faceHasUsableBasePoint(*parentC, &c, mc.top, kMinTetQuality) ||
+                    faceSkewnessOf(mc.top, *parentC, &c) > kSkewMax || faceNonOrthDegOf(mc.top, *parentC, &c) > kNonOrthMaxDeg) {
+                    return false;
+                }
+                for (std::size_t k = 1; k < mc.loops.size(); ++k) {
+                    if (evalFaceAgainstApex(mc.loops[k], c, r) || !faceHasUsableBasePoint(c, nullptr, mc.loops[k], kMinTetQuality) ||
+                        faceSkewnessOf(mc.loops[k], c, nullptr) > kSkewMax) {
+                        return false;
+                    }
+                }
+                if (r.nBadPyramidFaces > 0) return false;
+                // The part added below must not be folded on its own.
+                const double fs = faceScale[static_cast<std::size_t>(fi)];
+                const std::size_t n = mc.top.size();
+                std::vector<Vec3> mid, bot;
+                for (std::size_t i = 0; i < n; ++i) {
+                    mid.push_back(mc.loops[2 + 2 * i][3]);
+                    bot.push_back(mc.loops[1][i]);
+                }
+                return prismValid(mid, bot, 0.0, minVolEps * fs * fs * fs);
+            };
+            // Non-orthogonality of the side faces shared with a neighbour, against
+            // the neighbour's final centre (merged, newly built, or unchanged).
+            const auto sidesOk = [&](int fi, const MergedCell& mc, const Vec3& c) {
+                const IntSpan M = wallBucket.pointsOf(fi);
+                const int n = M.size();
+                const int owner = wallBucket.owner[static_cast<std::size_t>(fi)];
+                for (int i = 0; i < n; ++i) {
+                    const auto it = edgeToFaces.find(makeEdgeKey(M[i], M[(i + 1) % n]));
+                    if (it == edgeToFaces.end()) continue;
+                    for (int g : it->second) {
+                        if (g == fi) continue;
+                        const int nbrCell = wallBucket.owner[static_cast<std::size_t>(g)];
+                        const bool gMerged = mergeInto[static_cast<std::size_t>(g)] >= 0;
+                        // Upper side: shared with the neighbouring prism of the step above.
+                        if (nbrCell != owner) {
+                            const Vec3* nc = gMerged ? &mergedCentroid[static_cast<std::size_t>(g)] : lqOwnerCentroidOf(nbrCell);
+                            if (nc && faceNonOrthDegOf(mc.loops[static_cast<std::size_t>(2 + 2 * i)], c, nc) > kNonOrthMaxDeg) return false;
+                        }
+                        // Lower side: shared with whatever g becomes this step.
+                        const Vec3* lc = gMerged ? &mergedCentroid[static_cast<std::size_t>(g)]
+                                         : !reverted[static_cast<std::size_t>(g)] ? &faceQuality[static_cast<std::size_t>(g)].centroid
+                                                                                  : nullptr;
+                        if (lc && faceNonOrthDegOf(mc.loops[static_cast<std::size_t>(3 + 2 * i)], c, lc) > kNonOrthMaxDeg) return false;
+                    }
+                }
+                return true;
+            };
+            std::vector<MergedCell> cells(static_cast<std::size_t>(nTop));
+            std::vector<int> tentative;
+            for (int fi = 0; fi < nTop; ++fi) {
+                if (!reverted[static_cast<std::size_t>(fi)]) continue;
+                const std::vector<int>* T = eligible(fi);
+                if (!T) continue;
+                MergedCell mc = buildMerged(fi, *T);
+                const Vec3 c = polyhedronCentroidFromOutwardLoops(mc.loops);
+                if (!ownChecks(fi, mc, c)) continue;
+                mergeInto[static_cast<std::size_t>(fi)] = wallBucket.owner[static_cast<std::size_t>(fi)];
+                mergedCentroid[static_cast<std::size_t>(fi)] = c;
+                cells[static_cast<std::size_t>(fi)] = std::move(mc);
+                tentative.push_back(fi);
+            }
+            for (bool changed = true; changed;) {
+                changed = false;
+                for (int fi : tentative) {
+                    if (mergeInto[static_cast<std::size_t>(fi)] < 0) continue;
+                    if (!sidesOk(fi, cells[static_cast<std::size_t>(fi)], mergedCentroid[static_cast<std::size_t>(fi)])) {
+                        mergeInto[static_cast<std::size_t>(fi)] = -1;
+                        changed = true;
+                    }
+                }
+            }
+            for (int fi : tentative) {
+                if (mergeInto[static_cast<std::size_t>(fi)] < 0) continue;
+                // No longer a drop: take back what the validation loop recorded.
+                if (dropReason[static_cast<std::size_t>(fi)] == kDropCollapsed) {
+                    std::vector<Vec3> topL;
+                    for (int p : wallBucket.pointsOf(fi)) topL.push_back(P(p));
+                    --stats.thinDroppedFaces;
+                    stats.thinDroppedArea -= loopArea(topL);
+                    report.thinStacks.erase({pOrd, faceGateStack[static_cast<std::size_t>(fi)]});
+                }
+                if (qualityBad[static_cast<std::size_t>(fi)]) --stats.qualityDroppedFaces;
+                qualityBad[static_cast<std::size_t>(fi)] = 0;
+                dropReason[static_cast<std::size_t>(fi)] = 0;
+                reverted[static_cast<std::size_t>(fi)] = false;
+                LayerCellQuality q;
+                q.centroid = mergedCentroid[static_cast<std::size_t>(fi)];
+                faceQuality[static_cast<std::size_t>(fi)] = q;
+                const int owner = mergeInto[static_cast<std::size_t>(fi)];
+                if (static_cast<std::size_t>(owner) >= cellReached.size() || cellReached[static_cast<std::size_t>(owner)]) {
+                    ++stats.mergedLayerFaces; // counted, like a drop, only where the stack ships
+                }
+            }
+        }
         for (int fi = 0; fi < nTop; ++fi) {
             if (!reverted[static_cast<std::size_t>(fi)]) continue;
             const int ownerHere = wallBucket.owner[static_cast<std::size_t>(fi)];
@@ -2718,8 +2884,11 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 newFaceGateStack.push_back(faceGateStack[static_cast<std::size_t>(fi)]);
                 continue;
             }
-            const int prismCell = nextCellIndex++;
-            ++stats.perStepPrismCells[static_cast<std::size_t>(step)];
+            // A merged face extends the prism above it (see mergeInto): no new
+            // cell, and its top face -- the interface -- is not emitted.
+            const bool merged = mergeInto[static_cast<std::size_t>(fi)] >= 0;
+            const int prismCell = merged ? mergeInto[static_cast<std::size_t>(fi)] : nextCellIndex++;
+            if (!merged) ++stats.perStepPrismCells[static_cast<std::size_t>(step)];
             topFaceToPrism[static_cast<std::size_t>(fi)] = prismCell;
             const IntSpan topPts = wallBucket.pointsOf(fi);
             for (int p : topPts) {
@@ -2727,13 +2896,15 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
                 pointSpent[static_cast<std::size_t>(p)] = 1;
             }
             const int coreCell = wallBucket.owner[static_cast<std::size_t>(fi)];
-            if (static_cast<std::size_t>(prismCell) >= cellReached.size()) cellReached.resize(static_cast<std::size_t>(prismCell) + 1, 1);
-            cellReached[static_cast<std::size_t>(prismCell)] =
-                static_cast<std::size_t>(coreCell) < cellReached.size() ? cellReached[static_cast<std::size_t>(coreCell)] : 1;
-            // Top face becomes internal: owner (core) < neighbour
-            // (prism) always holds since prism indices are appended
-            // after every pre-existing cell.
-            internalOut.appendFrom(wallBucket, fi, coreCell, prismCell, -1);
+            if (!merged) {
+                if (static_cast<std::size_t>(prismCell) >= cellReached.size()) cellReached.resize(static_cast<std::size_t>(prismCell) + 1, 1);
+                cellReached[static_cast<std::size_t>(prismCell)] =
+                    static_cast<std::size_t>(coreCell) < cellReached.size() ? cellReached[static_cast<std::size_t>(coreCell)] : 1;
+                // Top face becomes internal: owner (core) < neighbour
+                // (prism) always holds since prism indices are appended
+                // after every pre-existing cell.
+                internalOut.appendFrom(wallBucket, fi, coreCell, prismCell, -1);
+            }
 
             std::vector<int> bottomPts;
             bottomPts.reserve(static_cast<std::size_t>(topPts.size()));
@@ -2743,6 +2914,13 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             newWallBucket.append(bottomPts, prismCell, -1, pOrd);
             newFaceOrigin.push_back(faceOrigin[static_cast<std::size_t>(fi)]);
             newFaceGateStack.push_back(faceGateStack[static_cast<std::size_t>(fi)]);
+            if (merged) {
+                mergedPrisms.insert(prismCell);
+            } else {
+                prismTopOf[prismCell] = std::vector<int>(topPts.begin(), topPts.end());
+                prismBottomOf[prismCell] = bottomPts;
+                prismParentOf[prismCell] = coreCell;
+            }
 
             // Evaluate this newly-created cell's own quality.
             // ALWAYS on (this is the gate's predicate; cost is
@@ -2787,12 +2965,14 @@ LayersResult applyLayersPass(const GeneratedMesh& cutMeshIn, const std::vector<i
             }
 
             const int coreLevel = levelOfCell(coreCell);
-            newCellLevels.push_back(coreLevel);
-            // Tag this prism with the stack it belongs to and the
-            // march step that made it (parallel to newCellLevels, so the same
-            // append order and the same final compaction apply).
-            newCellStackId.push_back(faceOrigin[static_cast<std::size_t>(fi)]);
-            newCellLayerIndex.push_back(step);
+            if (!merged) {
+                newCellLevels.push_back(coreLevel);
+                // Tag this prism with the stack it belongs to and the
+                // march step that made it (parallel to newCellLevels, so the same
+                // append order and the same final compaction apply).
+                newCellStackId.push_back(faceOrigin[static_cast<std::size_t>(fi)]);
+                newCellLayerIndex.push_back(step);
+            }
             for (int p : topPts) {
                 const std::size_t di = static_cast<std::size_t>(frontIdx[p]);
                 bottomPointLevelAcc[di] = std::max(bottomPointLevelAcc[di], coreLevel);

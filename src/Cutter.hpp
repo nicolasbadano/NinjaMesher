@@ -79,6 +79,7 @@ struct CutStats {
     std::vector<int> droppedByReason; // droppedFaces by first refusal (see LayerStats, LayerDropReason)
     long surfaceClampedSteps = 0;     // see LayerStats
     long buriedLandingFaces = 0;      // see LayerStats
+    long mergedLayerFaces = 0;        // see LayerStats
     double buriedLandingArea = 0.0;
     double buriedLandingMaxDepth = 0.0;
     double buriedLandingMaxDepthOverH = 0.0;

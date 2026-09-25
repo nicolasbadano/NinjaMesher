@@ -828,6 +828,7 @@ void runLayersStage(ninja::GeneratedMesh& mesh, std::vector<int>& cellLevel, std
     stats.droppedByReason = lr.stats.droppedByReason;
     stats.surfaceClampedSteps = lr.stats.surfaceClampedSteps;
     stats.buriedLandingFaces = lr.stats.buriedLandingFaces;
+    stats.mergedLayerFaces = lr.stats.mergedLayerFaces;
     stats.buriedLandingArea = lr.stats.buriedLandingArea;
     stats.buriedLandingMaxDepth = lr.stats.buriedLandingMaxDepth;
     stats.buriedLandingMaxDepthOverH = lr.stats.buriedLandingMaxDepthOverH;
@@ -1776,6 +1777,7 @@ int main(int argc, char** argv) {
                 }
                 std::cout << "qualityDroppedFaces = " << res.cutStats.qualityDroppedFaces << "\n";
                 std::cout << "surfaceClampedSteps = " << res.cutStats.surfaceClampedSteps << "\n";
+                std::cout << "mergedLayerFaces = " << res.cutStats.mergedLayerFaces << "\n";
                 std::cout << "buriedLandingFaces = " << res.cutStats.buriedLandingFaces << "\n";
                 std::cout << "buriedLandingArea = " << res.cutStats.buriedLandingArea << "\n";
                 std::cout << "buriedLandingMaxDepth = " << res.cutStats.buriedLandingMaxDepth << " ("
